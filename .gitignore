@@ -1,0 +1,6 @@
+valheim.app/
+*.bak
+*.tmp
+Patcher/bin/
+Patcher/obj/
+.DS_Store
