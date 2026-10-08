@@ -1,0 +1,49 @@
+#!/bin/bash
+set -e
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+ACTION="$1"
+shift || true
+
+case "$ACTION" in
+    patch)
+        "$SCRIPT_DIR/patch.sh" "$@"
+        ;;
+    status)
+        "$SCRIPT_DIR/patch.sh" --status "$@"
+        ;;
+    verify)
+        "$SCRIPT_DIR/patch.sh" --verify "$@"
+        ;;
+    restore)
+        "$SCRIPT_DIR/patch.sh" --restore "$@"
+        ;;
+    v5|v6)
+        "$SCRIPT_DIR/patch.sh" "$ACTION" "$@"
+        ;;
+    help|--help|-h|"")
+        echo "========================================================="
+        echo "     Valheim Native IL Patcher Runner                    "
+        echo "========================================================="
+        echo "Usage:"
+        echo "  ./start patch v6       Apply patch v6 (Recommended & Stable)"
+        echo "  ./start patch v5       Apply patch v5 (Legacy)"
+        echo "  ./start patch status   Check current patch marker & status"
+        echo "  ./start patch verify   Verify patch integrity in assembly"
+        echo "  ./start patch restore  Restore original vanilla assembly"
+        echo ""
+        echo "Direct shortcuts also supported:"
+        echo "  ./start v6             Same as './start patch v6'"
+        echo "  ./start v5             Same as './start patch v5'"
+        echo "  ./start status         Same as './start patch status'"
+        echo "  ./start verify         Same as './start patch verify'"
+        echo "  ./start restore        Same as './start patch restore'"
+        echo "========================================================="
+        ;;
+    *)
+        echo "[ERROR] Unknown command: '$ACTION'"
+        echo "Run './start help' to see available commands."
+        exit 1
+        ;;
+esac
