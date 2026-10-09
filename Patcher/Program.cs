@@ -43,7 +43,7 @@ namespace ValheimPatcher
 
         static int Main(string[] args)
         {
-            PatchVersion targetVersion = PatchVersion.V8;
+            PatchVersion targetVersion = PatchVersion.V7;
             bool restoreMode = false;
             bool statusMode = false;
             bool verifyMode = false;
