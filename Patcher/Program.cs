@@ -532,21 +532,14 @@ namespace ValheimPatcher
                 ApplyCharacterAnimatorLODV7(charType, humanoidType, setCullingMode);
             }
 
-            // ==================== V8 EXCLUSIVE ANTI-PATTERN FIXES (16-18) ====================
+            // ==================== V8 EXCLUSIVE ANTI-PATTERN FIXES (16-17) ====================
             if (targetVersion == PatchVersion.V8)
             {
-                Console.WriteLine("\n[16/18] Patching EnemyHud per-frame localization removal...");
+                Console.WriteLine("\n[16/17] Patching EnemyHud per-frame localization removal...");
                 var enemyHudType = FindOrThrow(module.Types, t => t.Name == "EnemyHud", "EnemyHud");
                 ApplyEnemyHudCachingV8(enemyHudType);
 
-                Console.WriteLine("\n[17/18] Patching InventoryGrid slot text caching...");
-                var igType = FindOrThrow(module.Types, t => t.Name == "InventoryGrid", "InventoryGrid");
-                var elemType = FindOrThrow(module.Types, t => t.Name == "InventoryElement", "InventoryElement");
-                var itemDropType = FindOrThrow(module.Types, t => t.Name == "ItemDrop", "ItemDrop");
-                var itemDataType = FindOrThrow(itemDropType.NestedTypes, t => t.Name == "ItemData", "ItemData");
-                ApplyInventoryGridCachingV8(igType, elemType, itemDataType);
-
-                Console.WriteLine("\n[18/18] Patching Pathfinding zero-alloc corner queries...");
+                Console.WriteLine("\n[17/17] Patching Pathfinding zero-alloc corner queries...");
                 var aiModuleAsm = resolver.Resolve(new AssemblyNameReference("UnityEngine.AIModule", new Version(0, 0, 0, 0)));
                 var navMeshPathType = FindOrThrow(aiModuleAsm.MainModule.Types, t => t.FullName == "UnityEngine.AI.NavMeshPath", "NavMeshPath");
                 var getCornersNonAlloc = module.ImportReference(FindOrThrow(navMeshPathType.Methods, m => m.Name == "GetCornersNonAlloc", "NavMeshPath.GetCornersNonAlloc"));
@@ -1800,118 +1793,7 @@ namespace ValheimPatcher
             updateHuds.Body.OptimizeMacros();
         }
 
-        static void ApplyInventoryGridCachingV8(TypeDefinition igType, TypeDefinition elemType, TypeDefinition itemDataType)
-        {
-            var module = igType.Module;
-            var fCachedQuality = new FieldDefinition("m_cachedQuality", FieldAttributes.Public, module.TypeSystem.Int32);
-            var fCachedStack = new FieldDefinition("m_cachedStack", FieldAttributes.Public, module.TypeSystem.Int32);
-            elemType.Fields.Add(fCachedQuality);
-            elemType.Fields.Add(fCachedStack);
 
-            var fItemQuality = FindOrThrow(itemDataType.Fields, f => f.Name == "m_quality", "ItemData.m_quality");
-            var fItemStack = FindOrThrow(itemDataType.Fields, f => f.Name == "m_stack", "ItemData.m_stack");
-
-            var ugMethod = FindOrThrow(igType.Methods, m => m.Name == "UpdateGui", "InventoryGrid.UpdateGui");
-            ugMethod.Body.SimplifyMacros();
-            var il = ugMethod.Body.GetILProcessor();
-
-            // Invalidate cache when element is marked unused (branch where !inventoryElement.m_used)
-            for (int i = 0; i < ugMethod.Body.Instructions.Count - 2; i++)
-            {
-                var inst = ugMethod.Body.Instructions[i];
-                if (inst.OpCode == OpCodes.Ldfld && inst.Operand?.ToString()?.Contains("m_used") == true &&
-                    ugMethod.Body.Instructions[i + 1].OpCode == OpCodes.Brtrue)
-                {
-                    var varInst = ugMethod.Body.Instructions[i - 1];
-                    var target = ugMethod.Body.Instructions[i + 2];
-                    if (varInst.Operand is VariableDefinition vElem)
-                    {
-                        il.InsertBefore(target, il.Create(OpCodes.Ldloc, vElem));
-                        il.InsertBefore(target, il.Create(OpCodes.Ldc_I4, -1));
-                        il.InsertBefore(target, il.Create(OpCodes.Stfld, fCachedQuality));
-                        il.InsertBefore(target, il.Create(OpCodes.Ldloc, vElem));
-                        il.InsertBefore(target, il.Create(OpCodes.Ldc_I4, -1));
-                        il.InsertBefore(target, il.Create(OpCodes.Stfld, fCachedStack));
-                        Console.WriteLine("  + InventoryGrid.UpdateGui: slot cache invalidation injected");
-                        break;
-                    }
-                }
-            }
-
-            // Quality caching
-            for (int i = 0; i < ugMethod.Body.Instructions.Count; i++)
-            {
-                var inst = ugMethod.Body.Instructions[i];
-                if (inst.OpCode == OpCodes.Callvirt && inst.Operand?.ToString()?.Contains("set_text") == true &&
-                    ugMethod.Body.Instructions[i - 1].OpCode == OpCodes.Call && ugMethod.Body.Instructions[i - 1].Operand?.ToString()?.Contains("ToString") == true)
-                {
-                    var startQual = ugMethod.Body.Instructions[i - 5];
-                    var skipQualTarget = ugMethod.Body.Instructions[i + 1];
-                    var v16 = ugMethod.Body.Variables[16];
-                    var v17 = ugMethod.Body.Variables[17];
-
-                    var c1 = il.Create(OpCodes.Ldloc, v17);
-                    var c2 = il.Create(OpCodes.Ldfld, fCachedQuality);
-                    var c3 = il.Create(OpCodes.Ldloc, v16);
-                    var c4 = il.Create(OpCodes.Ldfld, fItemQuality);
-                    var c5 = il.Create(OpCodes.Beq, skipQualTarget);
-                    var c6 = il.Create(OpCodes.Ldloc, v17);
-                    var c7 = il.Create(OpCodes.Ldloc, v16);
-                    var c8 = il.Create(OpCodes.Ldfld, fItemQuality);
-                    var c9 = il.Create(OpCodes.Stfld, fCachedQuality);
-
-                    il.InsertBefore(startQual, c1);
-                    il.InsertBefore(startQual, c2);
-                    il.InsertBefore(startQual, c3);
-                    il.InsertBefore(startQual, c4);
-                    il.InsertBefore(startQual, c5);
-                    il.InsertBefore(startQual, c6);
-                    il.InsertBefore(startQual, c7);
-                    il.InsertBefore(startQual, c8);
-                    il.InsertBefore(startQual, c9);
-                    Console.WriteLine("  + InventoryGrid.UpdateGui: m_quality caching injected");
-                    break;
-                }
-            }
-
-            // Amount caching
-            for (int i = 0; i < ugMethod.Body.Instructions.Count; i++)
-            {
-                var inst = ugMethod.Body.Instructions[i];
-                if (inst.OpCode == OpCodes.Callvirt && inst.Operand?.ToString()?.Contains("set_text") == true &&
-                    ugMethod.Body.Instructions[i - 1].OpCode == OpCodes.Call && ugMethod.Body.Instructions[i - 1].Operand?.ToString()?.Contains("Format") == true)
-                {
-                    var startAmt = ugMethod.Body.Instructions[i - 11];
-                    var skipAmtTarget = ugMethod.Body.Instructions[i + 1];
-                    var v16 = ugMethod.Body.Variables[16];
-                    var v17 = ugMethod.Body.Variables[17];
-
-                    var c1 = il.Create(OpCodes.Ldloc, v17);
-                    var c2 = il.Create(OpCodes.Ldfld, fCachedStack);
-                    var c3 = il.Create(OpCodes.Ldloc, v16);
-                    var c4 = il.Create(OpCodes.Ldfld, fItemStack);
-                    var c5 = il.Create(OpCodes.Beq, skipAmtTarget);
-                    var c6 = il.Create(OpCodes.Ldloc, v17);
-                    var c7 = il.Create(OpCodes.Ldloc, v16);
-                    var c8 = il.Create(OpCodes.Ldfld, fItemStack);
-                    var c9 = il.Create(OpCodes.Stfld, fCachedStack);
-
-                    il.InsertBefore(startAmt, c1);
-                    il.InsertBefore(startAmt, c2);
-                    il.InsertBefore(startAmt, c3);
-                    il.InsertBefore(startAmt, c4);
-                    il.InsertBefore(startAmt, c5);
-                    il.InsertBefore(startAmt, c6);
-                    il.InsertBefore(startAmt, c7);
-                    il.InsertBefore(startAmt, c8);
-                    il.InsertBefore(startAmt, c9);
-                    Console.WriteLine("  + InventoryGrid.UpdateGui: m_stack caching injected");
-                    break;
-                }
-            }
-
-            ugMethod.Body.OptimizeMacros();
-        }
 
         static void ApplyPathfindingZeroAllocV8(TypeDefinition pfType, TypeDefinition navMeshPathType, TypeDefinition vec3Type, MethodReference getCornersNonAlloc)
         {
@@ -2033,7 +1915,7 @@ namespace ValheimPatcher
             Console.WriteLine($"Detected marker: {marker.Name} -> verifying against {verToVerify.ToString().ToLower()} ruleset...\n");
 
             int checksPassed = 0;
-            int totalChecks = verToVerify == PatchVersion.V8 ? 14 : (verToVerify == PatchVersion.V7 ? 10 : (verToVerify == PatchVersion.V6 ? 9 : 8));
+            int totalChecks = verToVerify == PatchVersion.V8 ? 13 : (verToVerify == PatchVersion.V7 ? 10 : (verToVerify == PatchVersion.V6 ? 9 : 8));
 
             void AssertCheck(bool condition, string name, string details)
             {
@@ -2109,13 +1991,6 @@ namespace ValheimPatcher
                 bool ehNoPerFrameLocalize = !updateHuds.Body.Instructions.Any(i => i.OpCode == OpCodes.Callvirt && i.Operand?.ToString()?.Contains("GetHoverName") == true);
                 AssertCheck(ehNoPerFrameLocalize, "P1 EnemyHud Hover Optimization", "Eliminated redundant per-frame Localization.Localize & set_text in UpdateHuds");
 
-                // 13. InventoryGrid slot text caching
-                var invElem = FindOrThrow(module.Types, t => t.Name == "InventoryElement", "InventoryElement");
-                bool invElemHasCache = invElem.Fields.Any(f => f.Name == "m_cachedStack") && invElem.Fields.Any(f => f.Name == "m_cachedQuality");
-                var invGrid = FindOrThrow(module.Types, t => t.Name == "InventoryGrid", "InventoryGrid");
-                var updateGui = FindOrThrow(invGrid.Methods, m => m.Name == "UpdateGui", "InventoryGrid.UpdateGui");
-                bool updateGuiChecksCache = updateGui.Body.Instructions.Any(i => i.Operand?.ToString()?.Contains("m_cachedStack") == true);
-                AssertCheck(invElemHasCache && updateGuiChecksCache, "P1 InventoryGrid Slot Text Caching", "m_cachedStack & m_cachedQuality bypass per-frame formatting & TMP mesh regeneration");
 
                 // 14. Pathfinding zero-alloc corners
                 var pf = FindOrThrow(module.Types, t => t.Name == "Pathfinding", "Pathfinding");
