@@ -532,19 +532,12 @@ namespace ValheimPatcher
                 ApplyCharacterAnimatorLODV7(charType, humanoidType, setCullingMode);
             }
 
-            // ==================== V8 EXCLUSIVE ANTI-PATTERN FIXES (16-17) ====================
+            // ==================== V8 EXCLUSIVE ANTI-PATTERN FIXES (16) ====================
             if (targetVersion == PatchVersion.V8)
             {
-                Console.WriteLine("\n[16/17] Patching EnemyHud per-frame localization removal...");
+                Console.WriteLine("\n[16/16] Patching EnemyHud per-frame localization removal...");
                 var enemyHudType = FindOrThrow(module.Types, t => t.Name == "EnemyHud", "EnemyHud");
                 ApplyEnemyHudCachingV8(enemyHudType);
-
-                Console.WriteLine("\n[17/17] Patching Pathfinding zero-alloc corner queries...");
-                var aiModuleAsm = resolver.Resolve(new AssemblyNameReference("UnityEngine.AIModule", new Version(0, 0, 0, 0)));
-                var navMeshPathType = FindOrThrow(aiModuleAsm.MainModule.Types, t => t.FullName == "UnityEngine.AI.NavMeshPath", "NavMeshPath");
-                var getCornersNonAlloc = module.ImportReference(FindOrThrow(navMeshPathType.Methods, m => m.Name == "GetCornersNonAlloc", "NavMeshPath.GetCornersNonAlloc"));
-                var pfType = FindOrThrow(module.Types, t => t.Name == "Pathfinding", "Pathfinding");
-                ApplyPathfindingZeroAllocV8(pfType, navMeshPathType, vec3Type, getCornersNonAlloc);
             }
 
             // Add marker field
@@ -1915,7 +1908,7 @@ namespace ValheimPatcher
             Console.WriteLine($"Detected marker: {marker.Name} -> verifying against {verToVerify.ToString().ToLower()} ruleset...\n");
 
             int checksPassed = 0;
-            int totalChecks = verToVerify == PatchVersion.V8 ? 13 : (verToVerify == PatchVersion.V7 ? 10 : (verToVerify == PatchVersion.V6 ? 9 : 8));
+            int totalChecks = verToVerify == PatchVersion.V8 ? 12 : (verToVerify == PatchVersion.V7 ? 10 : (verToVerify == PatchVersion.V6 ? 9 : 8));
 
             void AssertCheck(bool condition, string name, string details)
             {
@@ -1985,28 +1978,20 @@ namespace ValheimPatcher
                 bool clutterHandlesOff = applySettings.Body.Instructions.Any(i => i.OpCode == OpCodes.Ldc_R4 && (float)i.Operand == 0.0f);
                 AssertCheck(clutterHandlesOff, "P1 ClutterSystem Quality Logic", "Sets 0m vegetation distance when Quality is Off");
 
-                // 10. EnemyHud hover text optimization
+                // 11. EnemyHud hover text optimization
                 var enemyHud = FindOrThrow(module.Types, t => t.Name == "EnemyHud", "EnemyHud");
                 var updateHuds = FindOrThrow(enemyHud.Methods, m => m.Name == "UpdateHuds", "EnemyHud.UpdateHuds");
                 bool ehNoPerFrameLocalize = !updateHuds.Body.Instructions.Any(i => i.OpCode == OpCodes.Callvirt && i.Operand?.ToString()?.Contains("GetHoverName") == true);
                 AssertCheck(ehNoPerFrameLocalize, "P1 EnemyHud Hover Optimization", "Eliminated redundant per-frame Localization.Localize & set_text in UpdateHuds");
 
-
-                // 14. Pathfinding zero-alloc corners
-                var pf = FindOrThrow(module.Types, t => t.Name == "Pathfinding", "Pathfinding");
-                bool pfHasHelper = pf.Methods.Any(m => m.Name == "AddCornersNonAlloc");
-                var pfGetPath = FindOrThrow(pf.Methods, m => m.Name == "GetPath" && m.Parameters.Count == 7, "Pathfinding.GetPath");
-                bool pfUsesHelper = pfGetPath.Body.Instructions.Any(i => i.OpCode == OpCodes.Call && i.Operand?.ToString()?.Contains("AddCornersNonAlloc") == true);
-                AssertCheck(pfHasHelper && pfUsesHelper, "P1 Pathfinding Zero-Alloc", "GetPath queries use AddCornersNonAlloc with 128-element buffer (0 heap arrays)");
-
-                // 15. Ragdoll safety
+                // 12. Ragdoll safety
                 var ragdoll = FindOrThrow(module.Types, t => t.Name == "Ragdoll", "Ragdoll");
                 bool ragdollNoLeak = !ragdoll.Fields.Any(f => f.Name == "s_activeRagdolls");
                 var ragdollAwake = FindOrThrow(ragdoll.Methods, m => m.Name == "Awake", "Ragdoll.Awake");
                 bool ragdollClampsTtl = ragdollAwake.Body.Instructions.Any(i => i.OpCode == OpCodes.Ldc_R4 && (float)i.Operand <= 3.5f);
                 AssertCheck(ragdollNoLeak && ragdollClampsTtl, "P2 Ragdoll Safety", "Clean PhysX release at TTL<=3.5s with zero static buffer leak");
 
-                // 16. All subsystems verified
+                // 13. All subsystems verified
                 AssertCheck(checksPassed == totalChecks - 1, "Overall Integrity", $"All {checksPassed}/{totalChecks - 1} subsystem audits passed successfully!");
             }
             else if (verToVerify == PatchVersion.V7)
