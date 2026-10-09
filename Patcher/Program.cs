@@ -11,13 +11,17 @@ namespace ValheimPatcher
     public enum PatchVersion
     {
         V5,
-        V6
+        V6,
+        V7,
+        V8
     }
 
     class Program
     {
         public const string MarkerFieldNameV5 = "s_nativePatched_v5";
         public const string MarkerFieldNameV6 = "s_nativePatched_v6";
+        public const string MarkerFieldNameV7 = "s_nativePatched_v7";
+        public const string MarkerFieldNameV8 = "s_nativePatched_v8";
 
         /// <summary>Safe lookup with descriptive error on game version mismatch.</summary>
         static T FindOrThrow<T>(IEnumerable<T> source, Func<T, bool> predicate, string context)
@@ -39,7 +43,7 @@ namespace ValheimPatcher
 
         static int Main(string[] args)
         {
-            PatchVersion targetVersion = PatchVersion.V6;
+            PatchVersion targetVersion = PatchVersion.V8;
             bool restoreMode = false;
             bool statusMode = false;
             bool verifyMode = false;
@@ -57,7 +61,7 @@ namespace ValheimPatcher
                 string arg = args[i].Trim();
                 if (string.Equals(arg, "patch", StringComparison.OrdinalIgnoreCase))
                 {
-                    // Allow subcommand syntax like: patch v5 / patch v6
+                    // Allow subcommand syntax like: patch v5 / patch v6 / patch v7 / patch v8
                     continue;
                 }
                 else if (string.Equals(arg, "v5", StringComparison.OrdinalIgnoreCase))
@@ -70,15 +74,27 @@ namespace ValheimPatcher
                     targetVersion = PatchVersion.V6;
                     verifyVersion = PatchVersion.V6;
                 }
+                else if (string.Equals(arg, "v7", StringComparison.OrdinalIgnoreCase))
+                {
+                    targetVersion = PatchVersion.V7;
+                    verifyVersion = PatchVersion.V7;
+                }
+                else if (string.Equals(arg, "v8", StringComparison.OrdinalIgnoreCase))
+                {
+                    targetVersion = PatchVersion.V8;
+                    verifyVersion = PatchVersion.V8;
+                }
                 else if ((arg == "--version" || arg == "-v") && i + 1 < args.Length)
                 {
                     string vStr = args[++i].Trim().ToLowerInvariant();
                     if (vStr == "5" || vStr == "v5") { targetVersion = PatchVersion.V5; verifyVersion = PatchVersion.V5; }
                     else if (vStr == "6" || vStr == "v6") { targetVersion = PatchVersion.V6; verifyVersion = PatchVersion.V6; }
+                    else if (vStr == "7" || vStr == "v7") { targetVersion = PatchVersion.V7; verifyVersion = PatchVersion.V7; }
+                    else if (vStr == "8" || vStr == "v8") { targetVersion = PatchVersion.V8; verifyVersion = PatchVersion.V8; }
                     else
                     {
                         Console.ForegroundColor = ConsoleColor.Red;
-                        Console.WriteLine($"[ERROR] Unknown version '{vStr}'. Supported versions: v5, v6");
+                        Console.WriteLine($"[ERROR] Unknown version '{vStr}'. Supported versions: v5, v6, v7, v8");
                         Console.ResetColor();
                         return 1;
                     }
@@ -99,6 +115,8 @@ namespace ValheimPatcher
                         string next = args[i + 1].Trim().ToLowerInvariant();
                         if (next == "v5" || next == "5") { verifyVersion = PatchVersion.V5; i++; }
                         else if (next == "v6" || next == "6") { verifyVersion = PatchVersion.V6; i++; }
+                        else if (next == "v7" || next == "7") { verifyVersion = PatchVersion.V7; i++; }
+                        else if (next == "v8" || next == "8") { verifyVersion = PatchVersion.V8; i++; }
                     }
                 }
                 else if (arg == "--managed" && i + 1 < args.Length)
@@ -107,19 +125,19 @@ namespace ValheimPatcher
                 }
                 else if (arg == "--physics-steps" && i + 1 < args.Length && int.TryParse(args[i + 1], out int ps))
                 {
-                    physicsSteps = ps; i++;
+                    physicsSteps = Math.Clamp(ps, 1, 30); i++;
                 }
                 else if (arg == "--spawn-limit" && i + 1 < args.Length && int.TryParse(args[i + 1], out int sl))
                 {
-                    spawnLimit = sl; i++;
+                    spawnLimit = Math.Max(1, sl); i++;
                 }
                 else if (arg == "--updates-per-frame" && i + 1 < args.Length && int.TryParse(args[i + 1], out int upf))
                 {
-                    updatesPerFrame = upf; i++;
+                    updatesPerFrame = Math.Max(1, upf); i++;
                 }
                 else if (arg == "--vegetation-distance" && i + 1 < args.Length && float.TryParse(args[i + 1], out float vd))
                 {
-                    vegetationDistance = vd; i++;
+                    vegetationDistance = Math.Max(0.0f, vd); i++;
                 }
                 else if (arg == "--help" || arg == "-h" || string.Equals(arg, "help", StringComparison.OrdinalIgnoreCase))
                 {
@@ -128,7 +146,13 @@ namespace ValheimPatcher
                 }
             }
 
-            string verTag = targetVersion == PatchVersion.V6 ? "v6 (Robust Network & Gameplay Edition)" : "v5 (Legacy Optimization Edition)";
+            string verTag = targetVersion switch
+            {
+                PatchVersion.V8 => "v8 (Zero-Stutter Anti-Pattern Elimination - Recommended)",
+                PatchVersion.V7 => "v7 (Engine & Gameplay Fixes Edition)",
+                PatchVersion.V6 => "v6 (Robust Network & Gameplay Edition)",
+                _ => "v5 (Legacy Optimization Edition)"
+            };
             Console.WriteLine("=========================================================");
             Console.WriteLine("     Valheim Native IL Patcher (macOS Apple Silicon)     ");
             Console.WriteLine("     Zero Rosetta, Zero BepInEx, Native arm64 Mono       ");
@@ -178,14 +202,16 @@ namespace ValheimPatcher
         static void PrintHelp()
         {
             Console.WriteLine("Usage: dotnet run --project Patcher [version] [options]");
-            Console.WriteLine("       ./patch.sh [v5|v6|--status|--verify|--restore]");
-            Console.WriteLine("       ./start patch [v5|v6|status|verify|restore]");
+            Console.WriteLine("       ./patch.sh [v5|v6|v7|v8|--status|--verify|--restore]");
+            Console.WriteLine("       ./start patch [v5|v6|v7|v8|status|verify|restore]");
             Console.WriteLine("\nVersions:");
-            Console.WriteLine("  v6                         Apply v6 patch set (Recommended, network & stability fixes)");
+            Console.WriteLine("  v8                         Apply v8 patch set (Recommended, zero-stutter anti-pattern fixes)");
+            Console.WriteLine("  v7                         Apply v7 patch set (Engine bugfixes & combat stability)");
+            Console.WriteLine("  v6                         Apply v6 patch set (Legacy network & stability fixes)");
             Console.WriteLine("  v5                         Apply v5 patch set (Legacy optimization set)");
             Console.WriteLine("\nOptions:");
             Console.WriteLine("  --status, status           Check current patch status and backup existence");
-            Console.WriteLine("  --verify [v5|v6], verify   Deep verify patch invariants in target assembly");
+            Console.WriteLine("  --verify [v5|v6|v7|v8], verify Deep verify patch invariants in target assembly");
             Console.WriteLine("  --restore, restore         Restore original assembly_valheim.dll from backup");
             Console.WriteLine("  --physics-steps <N>        Max FixedUpdate physics steps per frame (default: 4)");
             Console.WriteLine("  --spawn-limit <N>          Max ZNetScene objects spawned per frame in gameplay (default: 25)");
@@ -211,7 +237,11 @@ namespace ValheimPatcher
             if (marker != null)
             {
                 Console.ForegroundColor = ConsoleColor.Green;
-                if (marker.Name == MarkerFieldNameV6)
+                if (marker.Name == MarkerFieldNameV8)
+                    Console.WriteLine($"Status: ALREADY PATCHED (marker: {marker.Name} [v8 - Zero Stutter & Stability])");
+                else if (marker.Name == MarkerFieldNameV7)
+                    Console.WriteLine($"Status: ALREADY PATCHED (marker: {marker.Name} [v7 - Engine & Gameplay Fixes])");
+                else if (marker.Name == MarkerFieldNameV6)
                     Console.WriteLine($"Status: ALREADY PATCHED (marker: {marker.Name} [v6 - Robust & Stable])");
                 else if (marker.Name == MarkerFieldNameV5)
                     Console.WriteLine($"Status: ALREADY PATCHED (marker: {marker.Name} [v5 - Legacy])");
@@ -361,39 +391,62 @@ namespace ValheimPatcher
             var updaterType = FindOrThrow(module.Types, t => t.Name == "WearNTearUpdater", "WearNTearUpdater");
             if (targetVersion == PatchVersion.V5)
             {
-                Console.WriteLine($"\n[4/15] Patching WearNTear (v5 legacy fast-path, Max {updatesPerFrame} pieces/frame)...");
+                Console.WriteLine($"\n[4/18] Patching WearNTear (v5 legacy fast-path, Max {updatesPerFrame} pieces/frame)...");
                 ApplyWearNTearPatchesV5(wntType, updaterType, getFrameCount, updatesPerFrame);
+            }
+            else if (targetVersion == PatchVersion.V6)
+            {
+                Console.WriteLine($"\n[4/18] Patching WearNTear (v6 owner-guarded fast-path, Max {updatesPerFrame} pieces/frame)...");
+                ApplyWearNTearPatchesV6(wntType, updaterType, getFrameCount, isOwnerMethod, updatesPerFrame);
             }
             else
             {
-                Console.WriteLine($"\n[4/15] Patching WearNTear (v6 owner-guarded fast-path, Max {updatesPerFrame} pieces/frame)...");
-                ApplyWearNTearPatchesV6(wntType, updaterType, getFrameCount, isOwnerMethod, updatesPerFrame);
+                Console.WriteLine($"\n[4/18] Patching WearNTear ({(targetVersion == PatchVersion.V8 ? "v8 smoothed" : "v7 robust")}, Max {updatesPerFrame} pieces/frame)...");
+                var fSupportColliders = FindOrThrow(wntType.Fields, f => f.Name == "m_supportColliders", "m_supportColliders");
+                var getCountList = module.ImportReference(new MethodReference("get_Count", module.TypeSystem.Int32, fSupportColliders.FieldType) { HasThis = true });
+                ApplyWearNTearPatchesV7(wntType, updaterType, getFrameCount, getCountList, updatesPerFrame);
+                if (targetVersion == PatchVersion.V8)
+                {
+                    ApplyWearNTearUpdaterSmoothedV8(updaterType, wntType);
+                }
             }
 
             // Patch 4: ClutterSystem Vegetation Distance
-            Console.WriteLine($"\n[5/15] Patching ClutterSystem vegetation draw distance ({vegetationDistance}m on High)...");
+            Console.WriteLine($"\n[5/18] Patching ClutterSystem vegetation draw distance ({vegetationDistance}m on High)...");
             var clutterType = FindOrThrow(module.Types, t => t.Name == "ClutterSystem", "ClutterSystem");
             ApplyClutterSystemPatches(clutterType, vegetationDistance);
 
-            // Patch 5: Heightmap PhysX Cooking
-            Console.WriteLine("\n[6/15] Patching Heightmap PhysX FastMidphase cooking options...");
+            // Patch 5: Heightmap PhysX Cooking & Zero-Alloc Collision Mesh
+            Console.WriteLine("\n[6/18] Patching Heightmap PhysX FastMidphase cooking options & zero-alloc mesh...");
             var heightmapType = FindOrThrow(module.Types, t => t.Name == "Heightmap", "Heightmap");
             ApplyHeightmapPatches(heightmapType, setCookingOptions);
+            if (targetVersion == PatchVersion.V8)
+            {
+                ApplyHeightmapZeroAllocV8(heightmapType);
+            }
 
             // Patch 6: EffectList ParentConstraint Spike Removal
-            Console.WriteLine("\n[7/15] Patching EffectList & MessageHud spike elimination...");
+            Console.WriteLine("\n[7/18] Patching EffectList & MessageHud spike elimination...");
             var effectListType = FindOrThrow(module.Types, t => t.Name == "EffectList", "EffectList");
             if (targetVersion == PatchVersion.V5)
                 ApplyEffectListPatchesV5(effectListType, getTransformGO, getParent, setParent);
-            else
+            else if (targetVersion == PatchVersion.V6)
                 ApplyEffectListPatchesV6(effectListType, getTransformGO, getParent, setParentTwo, opImplicit);
+            else
+                ApplyEffectListPatchesV7(effectListType, getTransformGO, getParent, setParentTwo, opImplicit);
 
-            // Patch 7: MessageHud Canvas Isolation
+            // Patch 7: MessageHud Canvas Isolation (& DamageText/EnemyHud for v8)
             var messageHudType = FindOrThrow(module.Types, t => t.Name == "MessageHud", "MessageHud");
             ApplyMessageHudCanvasIsolation(messageHudType, getGameObject, getCompCanvas, addCompCanvas);
+            if (targetVersion == PatchVersion.V8)
+            {
+                var damageTextType = FindOrThrow(module.Types, t => t.Name == "DamageText", "DamageText");
+                var enemyHudType = FindOrThrow(module.Types, t => t.Name == "EnemyHud", "EnemyHud");
+                ApplyCanvasIsolationV8(damageTextType, enemyHudType, getGameObject, getCompCanvas, addCompCanvas);
+            }
 
             // Patch 8: Forward Light Rendering Limits & Soft Particles
-            Console.WriteLine("\n[8/15] Patching Forward Light rendering limits & disabling soft particles...");
+            Console.WriteLine("\n[8/18] Patching Forward Light rendering limits & disabling soft particles...");
             var gsmType = FindOrThrow(module.Types, t => t.Name == "GraphicsSettingsManager", "GraphicsSettingsManager");
             var lightLodType = FindOrThrow(module.Types, t => t.Name == "LightLod", "LightLod");
             if (targetVersion == PatchVersion.V5)
@@ -402,74 +455,122 @@ namespace ValheimPatcher
                 ApplyForwardRenderingPatchesV6(gsmType, lightLodType);
 
             // Patch 9: LightFlicker Transform Hierarchy
-            Console.WriteLine("\n[9/15] Patching LightFlicker to eliminate transform hierarchy invalidation...");
+            Console.WriteLine("\n[9/18] Patching LightFlicker to eliminate transform hierarchy invalidation...");
             var lightFlickerType = FindOrThrow(module.Types, t => t.Name == "LightFlicker", "LightFlicker");
             ApplyLightFlickerPatches(lightFlickerType);
 
             // Patch 10: Global Smoke Particle Cap
-            Console.WriteLine("\n[10/15] Patching SmokeSpawner global particle & PhysX body cap...");
+            Console.WriteLine("\n[10/18] Patching SmokeSpawner global particle & PhysX body cap...");
             var smokeSpawnerType = FindOrThrow(module.Types, t => t.Name == "SmokeSpawner", "SmokeSpawner");
             ApplySmokeSpawnerPatches(smokeSpawnerType);
 
             // Patch 11: Fire.Dot PhysX Throttle
-            Console.WriteLine("\n[11/15] Patching Fire.Dot PhysX OverlapSphere query interval...");
+            Console.WriteLine("\n[11/18] Patching Fire.Dot PhysX OverlapSphere query interval...");
             var fireType = FindOrThrow(module.Types, t => t.Name == "Fire", "Fire");
             ApplyFireDotInterval(fireType);
 
-            // ==================== VERSION-SPECIFIC PATCHES (12-15) ====================
+            // ==================== VERSION-SPECIFIC PATCHES (12-18) ====================
 
             // Patch 12: Fire distance cull
             if (targetVersion == PatchVersion.V5)
             {
-                Console.WriteLine("\n[12/15] Patching Fire (v5 legacy 30m distance cull)...");
+                Console.WriteLine("\n[12/18] Patching Fire (v5 legacy 30m distance cull)...");
                 ApplyFireDistanceCullV5(fireType, playerType, mathfMaxFloat, getTransformComp, getPosition, vec3Distance);
+            }
+            else if (targetVersion == PatchVersion.V6)
+            {
+                Console.WriteLine("\n[12/18] Patching Fire (v6 owner-safe distance cull & updateRate floor)...");
+                ApplyFireDistanceCullV6(fireType, playerType, mathfMaxFloat, getTransformComp, getPosition, vec3Distance, isOwnerMethod, opImplicit);
             }
             else
             {
-                Console.WriteLine("\n[12/15] Patching Fire (v6 owner-safe distance cull & updateRate floor)...");
-                ApplyFireDistanceCullV6(fireType, playerType, mathfMaxFloat, getTransformComp, getPosition, vec3Distance, isOwnerMethod, opImplicit);
+                Console.WriteLine($"\n[12/18] Patching Fire ({(targetVersion == PatchVersion.V8 ? "v8" : "v7")} clean: preserved vanilla UpdateFire integrity, dotInterval=2.0s active)...");
             }
 
             // Patch 13: Ragdoll
             var ragdollType = FindOrThrow(module.Types, t => t.Name == "Ragdoll", "Ragdoll");
             if (targetVersion == PatchVersion.V5)
             {
-                Console.WriteLine("\n[13/15] Patching Ragdoll (v5 legacy ring buffer 8, TTL 4.5s)...");
+                Console.WriteLine("\n[13/18] Patching Ragdoll (v5 legacy ring buffer 8, TTL 4.5s)...");
                 ApplyRagdollPatchesV5(ragdollType, mathfMinFloat, opImplicit);
+            }
+            else if (targetVersion == PatchVersion.V6)
+            {
+                Console.WriteLine("\n[13/18] Patching Ragdoll (v6 TTL 3.5s, floating bypass, zero memory leak)...");
+                ApplyRagdollPatchesV6(ragdollType, mathfMinFloat);
             }
             else
             {
-                Console.WriteLine("\n[13/15] Patching Ragdoll (v6 TTL 3.5s, floating bypass, zero memory leak)...");
-                ApplyRagdollPatchesV6(ragdollType, mathfMinFloat);
+                Console.WriteLine($"\n[13/18] Patching Ragdoll ({(targetVersion == PatchVersion.V8 ? "v8" : "v7")} TTL 3.5s clean PhysX release)...");
+                ApplyRagdollPatchesV7(ragdollType, mathfMinFloat);
             }
 
             // Patch 14: EffectList frame limiter
             if (targetVersion == PatchVersion.V5)
             {
-                Console.WriteLine("\n[14/15] Patching EffectList global frame limiter (v5 newarr GameObject)...");
+                Console.WriteLine("\n[14/18] Patching EffectList global frame limiter (v5 newarr GameObject)...");
                 ApplyEffectListFrameLimiterV5(effectListType, gameType, playerType, getTransformComp, getPosition, vec3Distance, goTypeRef);
+            }
+            else if (targetVersion == PatchVersion.V6)
+            {
+                Console.WriteLine("\n[14/18] Patching EffectList global frame limiter (v6 Array.Empty<GameObject>, op_Implicit)...");
+                ApplyEffectListFrameLimiterV6(effectListType, gameType, playerType, getTransformComp, getPosition, vec3Distance, arrayEmptyGameObject, opImplicit);
             }
             else
             {
-                Console.WriteLine("\n[14/15] Patching EffectList global frame limiter (v6 Array.Empty<GameObject>, op_Implicit)...");
-                ApplyEffectListFrameLimiterV6(effectListType, gameType, playerType, getTransformComp, getPosition, vec3Distance, arrayEmptyGameObject, opImplicit);
+                Console.WriteLine($"\n[14/18] Patching EffectList global frame limiter ({(targetVersion == PatchVersion.V8 ? "v8" : "v7")} 45m combat range, <=16 free, <=32 cap)...");
+                ApplyEffectListFrameLimiterV7(effectListType, gameType, playerType, getTransformComp, getPosition, vec3Distance, arrayEmptyGameObject, opImplicit);
             }
 
             // Patch 15: Character Animator LOD
             var charType = FindOrThrow(module.Types, t => t.Name == "Character", "Character");
+            var humanoidType = FindOrThrow(module.Types, t => t.Name == "Humanoid", "Humanoid");
             if (targetVersion == PatchVersion.V5)
             {
-                Console.WriteLine("\n[15/15] Patching Character Animator LOD (v5 global CullUpdateTransforms)...");
+                Console.WriteLine("\n[15/18] Patching Character Animator LOD (v5 global CullUpdateTransforms)...");
                 ApplyCharacterAnimatorLODV5(charType, setCullingMode);
+            }
+            else if (targetVersion == PatchVersion.V6)
+            {
+                Console.WriteLine("\n[15/18] Patching Character Animator LOD (v6 CullUpdateTransforms excluding Player/Bosses)...");
+                ApplyCharacterAnimatorLODV6(charType, playerType, setCullingMode);
             }
             else
             {
-                Console.WriteLine("\n[15/15] Patching Character Animator LOD (v6 CullUpdateTransforms excluding Player/Bosses)...");
-                ApplyCharacterAnimatorLODV6(charType, playerType, setCullingMode);
+                Console.WriteLine($"\n[15/18] Patching Character Animator LOD ({(targetVersion == PatchVersion.V8 ? "v8" : "v7")} CullUpdateTransforms only for ambient wildlife, full combat safety)...");
+                ApplyCharacterAnimatorLODV7(charType, humanoidType, setCullingMode);
+            }
+
+            // ==================== V8 EXCLUSIVE ANTI-PATTERN FIXES (16-18) ====================
+            if (targetVersion == PatchVersion.V8)
+            {
+                Console.WriteLine("\n[16/18] Patching EnemyHud per-frame localization removal...");
+                var enemyHudType = FindOrThrow(module.Types, t => t.Name == "EnemyHud", "EnemyHud");
+                ApplyEnemyHudCachingV8(enemyHudType);
+
+                Console.WriteLine("\n[17/18] Patching InventoryGrid slot text caching...");
+                var igType = FindOrThrow(module.Types, t => t.Name == "InventoryGrid", "InventoryGrid");
+                var elemType = FindOrThrow(module.Types, t => t.Name == "InventoryElement", "InventoryElement");
+                var itemDropType = FindOrThrow(module.Types, t => t.Name == "ItemDrop", "ItemDrop");
+                var itemDataType = FindOrThrow(itemDropType.NestedTypes, t => t.Name == "ItemData", "ItemData");
+                ApplyInventoryGridCachingV8(igType, elemType, itemDataType);
+
+                Console.WriteLine("\n[18/18] Patching Pathfinding zero-alloc corner queries...");
+                var aiModuleAsm = resolver.Resolve(new AssemblyNameReference("UnityEngine.AIModule", new Version(0, 0, 0, 0)));
+                var navMeshPathType = FindOrThrow(aiModuleAsm.MainModule.Types, t => t.FullName == "UnityEngine.AI.NavMeshPath", "NavMeshPath");
+                var getCornersNonAlloc = module.ImportReference(FindOrThrow(navMeshPathType.Methods, m => m.Name == "GetCornersNonAlloc", "NavMeshPath.GetCornersNonAlloc"));
+                var pfType = FindOrThrow(module.Types, t => t.Name == "Pathfinding", "Pathfinding");
+                ApplyPathfindingZeroAllocV8(pfType, navMeshPathType, vec3Type, getCornersNonAlloc);
             }
 
             // Add marker field
-            string activeMarker = targetVersion == PatchVersion.V5 ? MarkerFieldNameV5 : MarkerFieldNameV6;
+            string activeMarker = targetVersion switch
+            {
+                PatchVersion.V8 => MarkerFieldNameV8,
+                PatchVersion.V7 => MarkerFieldNameV7,
+                PatchVersion.V6 => MarkerFieldNameV6,
+                _ => MarkerFieldNameV5
+            };
             var wntType2 = FindOrThrow(module.Types, t => t.Name == "WearNTear", "WearNTear");
             wntType2.Fields.Add(new FieldDefinition(activeMarker, FieldAttributes.Private | FieldAttributes.Static, module.TypeSystem.Boolean));
 
@@ -523,7 +624,15 @@ namespace ValheimPatcher
             var createObjects = FindOrThrow(znetType.Methods, m => m.Name == "CreateObjects" && m.Parameters.Count == 2, "ZNetScene.CreateObjects(2)");
             if (createObjects.Body.Instructions[0].OpCode == OpCodes.Ldc_I4_S && (sbyte)createObjects.Body.Instructions[0].Operand == 10)
             {
-                createObjects.Body.Instructions[0].Operand = (sbyte)spawnLimit;
+                if (spawnLimit <= 127 && spawnLimit >= -128)
+                {
+                    createObjects.Body.Instructions[0].Operand = (sbyte)spawnLimit;
+                }
+                else
+                {
+                    createObjects.Body.Instructions[0].OpCode = OpCodes.Ldc_I4;
+                    createObjects.Body.Instructions[0].Operand = spawnLimit;
+                }
                 Console.WriteLine($"  + ZNetScene.CreateObjects: gameplay default clamped to {spawnLimit}");
             }
             var createObjectsSorted = FindOrThrow(znetType.Methods, m => m.Name == "CreateObjectsSorted" && m.Parameters.Count == 3, "ZNetScene.CreateObjectsSorted(3)");
@@ -563,10 +672,22 @@ namespace ValheimPatcher
                 {
                     int idx = applySettings.Body.Instructions.IndexOf(callClearAll);
                     var ldarg0CA = applySettings.Body.Instructions[idx - 1];
+                    var setLow = il.Create(OpCodes.Ldarg_0);
                     var setMed = il.Create(OpCodes.Ldarg_0);
                     var setHigh = il.Create(OpCodes.Ldarg_0);
                     var done = ldarg0CA;
+
+                    // Quality.Off (0) -> 0.0f
                     il.InsertBefore(ldarg0CA, il.Create(OpCodes.Ldarg_0));
+                    il.InsertBefore(ldarg0CA, il.Create(OpCodes.Ldfld, fQuality));
+                    il.InsertBefore(ldarg0CA, il.Create(OpCodes.Brtrue_S, setLow));
+                    il.InsertBefore(ldarg0CA, il.Create(OpCodes.Ldarg_0));
+                    il.InsertBefore(ldarg0CA, il.Create(OpCodes.Ldc_R4, 0.0f));
+                    il.InsertBefore(ldarg0CA, il.Create(OpCodes.Stfld, fDistance));
+                    il.InsertBefore(ldarg0CA, il.Create(OpCodes.Br, done));
+
+                    // Quality.Low (1) -> 30.0f
+                    il.InsertBefore(ldarg0CA, setLow);
                     il.InsertBefore(ldarg0CA, il.Create(OpCodes.Ldfld, fQuality));
                     il.InsertBefore(ldarg0CA, il.Create(OpCodes.Ldc_I4_1));
                     il.InsertBefore(ldarg0CA, il.Create(OpCodes.Bne_Un, setMed));
@@ -574,6 +695,8 @@ namespace ValheimPatcher
                     il.InsertBefore(ldarg0CA, il.Create(OpCodes.Ldc_R4, 30.0f));
                     il.InsertBefore(ldarg0CA, il.Create(OpCodes.Stfld, fDistance));
                     il.InsertBefore(ldarg0CA, il.Create(OpCodes.Br, done));
+
+                    // Quality.Med (2) -> 35.0f
                     il.InsertBefore(ldarg0CA, setMed);
                     il.InsertBefore(ldarg0CA, il.Create(OpCodes.Ldfld, fQuality));
                     il.InsertBefore(ldarg0CA, il.Create(OpCodes.Ldc_I4_2));
@@ -582,10 +705,12 @@ namespace ValheimPatcher
                     il.InsertBefore(ldarg0CA, il.Create(OpCodes.Ldc_R4, 35.0f));
                     il.InsertBefore(ldarg0CA, il.Create(OpCodes.Stfld, fDistance));
                     il.InsertBefore(ldarg0CA, il.Create(OpCodes.Br, done));
+
+                    // Quality.High (3+) -> newDistance
                     il.InsertBefore(ldarg0CA, setHigh);
                     il.InsertBefore(ldarg0CA, il.Create(OpCodes.Ldc_R4, newDistance));
                     il.InsertBefore(ldarg0CA, il.Create(OpCodes.Stfld, fDistance));
-                    Console.WriteLine($"  + ClutterSystem.ApplySettings: Low:30m Med:35m High:{newDistance}m");
+                    Console.WriteLine($"  + ClutterSystem.ApplySettings: Off:0m Low:30m Med:35m High:{newDistance}m");
                 }
             }
         }
@@ -1161,6 +1286,126 @@ namespace ValheimPatcher
             }
         }
 
+        static void ApplyWearNTearPatchesV7(TypeDefinition wntType, TypeDefinition updaterType, MethodReference getFrameCount, MethodReference getCountList, int maxUpdatesPerFrame)
+        {
+            void SetLdcI4(Instruction inst, int val)
+            {
+                if (val <= 127 && val >= -128)
+                {
+                    inst.OpCode = OpCodes.Ldc_I4_S;
+                    inst.Operand = (sbyte)val;
+                }
+                else
+                {
+                    inst.OpCode = OpCodes.Ldc_I4;
+                    inst.Operand = val;
+                }
+            }
+
+            var ctor = FindOrThrow(updaterType.Methods, m => m.IsConstructor && !m.IsStatic, "WearNTearUpdater..ctor");
+            foreach (var inst in ctor.Body.Instructions)
+                if (inst.OpCode == OpCodes.Ldc_I4_S && (sbyte)inst.Operand == 50)
+                { SetLdcI4(inst, maxUpdatesPerFrame); Console.WriteLine($"  + WearNTearUpdater..ctor: 50 -> {maxUpdatesPerFrame}"); break; }
+
+            var updateWearNTear = FindOrThrow(updaterType.Methods, m => m.Name == "UpdateWearNTear", "WearNTearUpdater.UpdateWearNTear");
+            foreach (var inst in updateWearNTear.Body.Instructions)
+                if (inst.OpCode == OpCodes.Ldc_I4_S && (sbyte)inst.Operand == 100)
+                { SetLdcI4(inst, maxUpdatesPerFrame); Console.WriteLine($"  + WearNTearUpdater.UpdateWearNTear: upper clamp 100 -> {maxUpdatesPerFrame}"); break; }
+
+            // Note: WearNTear.GetSupport is NOT patched in v7 (vanilla already returns m_support when IsOwner).
+            // Note: WearNTear.HaveSupport is NOT patched in v7 (vanilla m_support >= GetMinSupport() is clean and preserves heavy materials).
+            Console.WriteLine("  + WearNTear: Preserved vanilla GetSupport & HaveSupport (stone/iron/marble structural integrity intact)");
+
+            // ShouldUpdateSupport:
+            // return true if wnt.m_support <= 0f || wnt.m_clearCachedSupport || wnt.m_supportColliders == null || wnt.m_supportColliders.Count == 0 || ((frameCount & 7) == (m_myIndex & 7));
+            var fSupport = FindOrThrow(wntType.Fields, f => f.Name == "m_support", "WearNTear.m_support");
+            var fClearCachedSupport = FindOrThrow(wntType.Fields, f => f.Name == "m_clearCachedSupport", "m_clearCachedSupport");
+            var fSupportColliders = FindOrThrow(wntType.Fields, f => f.Name == "m_supportColliders", "m_supportColliders");
+            var fMyIndex = FindOrThrow(wntType.Fields, f => f.Name == "m_myIndex", "m_myIndex");
+
+            var shouldUpdate = new MethodDefinition("ShouldUpdateSupport", MethodAttributes.Public | MethodAttributes.Static | MethodAttributes.HideBySig, wntType.Module.TypeSystem.Boolean);
+            shouldUpdate.Parameters.Add(new ParameterDefinition("wnt", ParameterAttributes.None, wntType));
+            var ilSU = shouldUpdate.Body.GetILProcessor();
+            var retTrue = ilSU.Create(OpCodes.Ldc_I4_1);
+            var retTrueEnd = ilSU.Create(OpCodes.Ret);
+            var checkSupport = ilSU.Create(OpCodes.Ldarg_0);
+
+            ilSU.Append(ilSU.Create(OpCodes.Ldarg_0));
+            ilSU.Append(ilSU.Create(OpCodes.Brtrue_S, checkSupport));
+            ilSU.Append(ilSU.Create(OpCodes.Ldc_I4_0));
+            ilSU.Append(ilSU.Create(OpCodes.Ret));
+
+            ilSU.Append(checkSupport);
+            ilSU.Append(ilSU.Create(OpCodes.Ldfld, fSupport));
+            ilSU.Append(ilSU.Create(OpCodes.Ldc_R4, 0.0f));
+            ilSU.Append(ilSU.Create(OpCodes.Ble_Un_S, retTrue));
+
+            ilSU.Append(ilSU.Create(OpCodes.Ldarg_0));
+            ilSU.Append(ilSU.Create(OpCodes.Ldfld, fClearCachedSupport));
+            ilSU.Append(ilSU.Create(OpCodes.Brtrue_S, retTrue));
+
+            // Check if m_supportColliders is null
+            ilSU.Append(ilSU.Create(OpCodes.Ldarg_0));
+            ilSU.Append(ilSU.Create(OpCodes.Ldfld, fSupportColliders));
+            ilSU.Append(ilSU.Create(OpCodes.Brfalse_S, retTrue));
+
+            // Check if m_supportColliders.Count == 0
+            ilSU.Append(ilSU.Create(OpCodes.Ldarg_0));
+            ilSU.Append(ilSU.Create(OpCodes.Ldfld, fSupportColliders));
+            ilSU.Append(ilSU.Create(OpCodes.Callvirt, getCountList));
+            ilSU.Append(ilSU.Create(OpCodes.Brfalse_S, retTrue));
+
+            // Stagger 1-in-8 frames
+            ilSU.Append(ilSU.Create(OpCodes.Call, getFrameCount));
+            ilSU.Append(ilSU.Create(OpCodes.Ldc_I4_7));
+            ilSU.Append(ilSU.Create(OpCodes.And));
+            ilSU.Append(ilSU.Create(OpCodes.Ldarg_0));
+            ilSU.Append(ilSU.Create(OpCodes.Ldfld, fMyIndex));
+            ilSU.Append(ilSU.Create(OpCodes.Ldc_I4_7));
+            ilSU.Append(ilSU.Create(OpCodes.And));
+            ilSU.Append(ilSU.Create(OpCodes.Ceq));
+            ilSU.Append(ilSU.Create(OpCodes.Ret));
+
+            ilSU.Append(retTrue);
+            ilSU.Append(retTrueEnd);
+            wntType.Methods.Add(shouldUpdate);
+            Console.WriteLine("  + WearNTear.ShouldUpdateSupport: checks support <= 0, cache empty, or 1/8 staggered frames");
+
+            // Guard UpdateSupport AND HaveSupport block in UpdateWear
+            var updateWear = FindOrThrow(wntType.Methods, m => m.Name == "UpdateWear", "WearNTear.UpdateWear");
+            var ilUW = updateWear.Body.GetILProcessor();
+            for (int i = 0; i < updateWear.Body.Instructions.Count; i++)
+            {
+                var inst = updateWear.Body.Instructions[i];
+                if (inst.OpCode == OpCodes.Call && inst.Operand?.ToString()?.Contains("UpdateSupport") == true)
+                {
+                    var ldarg0 = updateWear.Body.Instructions[i - 1];
+                    // Locate skip target (after HaveSupport and damage block)
+                    Instruction? skipTarget = null;
+                    for (int j = i; j < Math.Min(i + 10, updateWear.Body.Instructions.Count); j++)
+                    {
+                        if (updateWear.Body.Instructions[j].OpCode == OpCodes.Call && updateWear.Body.Instructions[j].Operand?.ToString()?.Contains("HaveSupport") == true)
+                        {
+                            var brInst = updateWear.Body.Instructions[j + 1];
+                            if (brInst.Operand is Instruction targetInst)
+                            {
+                                skipTarget = targetInst;
+                                break;
+                            }
+                        }
+                    }
+                    if (skipTarget == null)
+                        throw new InvalidOperationException("[PATCH ERROR] Could not determine skip target for WearNTear.UpdateWear HaveSupport block");
+
+                    ilUW.InsertBefore(ldarg0, ilUW.Create(OpCodes.Ldarg_0));
+                    ilUW.InsertBefore(ldarg0, ilUW.Create(OpCodes.Call, shouldUpdate));
+                    ilUW.InsertBefore(ldarg0, ilUW.Create(OpCodes.Brfalse, skipTarget));
+                    Console.WriteLine("  + WearNTear.UpdateWear: guarded entire support/destruction block with ShouldUpdateSupport");
+                    break;
+                }
+            }
+        }
+
         static void ApplyEffectListPatchesV6(TypeDefinition effectListType, MethodReference getTransform, MethodReference getParent, MethodReference setParentTwo, MethodReference opImplicit)
         {
             var m = effectListType.Methods.FirstOrDefault(x => x.Name == "Create" && x.Parameters.Count == 6);
@@ -1196,6 +1441,43 @@ namespace ValheimPatcher
             for (int i = 0; i < ni.Length; i++) instrs[startIdx + i] = ni[i];
             for (int i = startIdx + ni.Length; i <= endIdx; i++) { instrs[i].OpCode = OpCodes.Nop; instrs[i].Operand = null; }
             Console.WriteLine("  + EffectList.Create: ParentConstraint -> transform.SetParent(parent, false)");
+        }
+
+        static void ApplyEffectListPatchesV7(TypeDefinition effectListType, MethodReference getTransform, MethodReference getParent, MethodReference setParentTwo, MethodReference opImplicit)
+        {
+            var m = effectListType.Methods.FirstOrDefault(x => x.Name == "Create" && x.Parameters.Count == 6);
+            if (m == null) return;
+            var instrs = m.Body.Instructions;
+            int startIdx = -1, endIdx = -1;
+            for (int i = 0; i < instrs.Count; i++)
+                if (instrs[i].OpCode == OpCodes.Callvirt && instrs[i].Operand?.ToString()?.Contains("ParentConstraint") == true)
+                { startIdx = i - 1; break; }
+            if (startIdx == -1) return;
+            for (int i = startIdx; i < instrs.Count; i++)
+                if (instrs[i].OpCode == OpCodes.Callvirt && instrs[i].Operand?.ToString()?.Contains("set_constraintActive") == true)
+                { endIdx = i; break; }
+            if (endIdx == -1) return;
+            var skipTarget = instrs[endIdx + 1];
+            var il = m.Body.GetILProcessor();
+            var instanceVar = m.Body.Variables[6];
+            var ni = new[] {
+                il.Create(OpCodes.Ldloc_3),
+                il.Create(OpCodes.Call, opImplicit),
+                il.Create(OpCodes.Brfalse_S, skipTarget),
+                il.Create(OpCodes.Ldloc_S, instanceVar),
+                il.Create(OpCodes.Callvirt, getTransform),
+                il.Create(OpCodes.Callvirt, getParent),
+                il.Create(OpCodes.Call, opImplicit),
+                il.Create(OpCodes.Brtrue_S, skipTarget),
+                il.Create(OpCodes.Ldloc_S, instanceVar),
+                il.Create(OpCodes.Callvirt, getTransform),
+                il.Create(OpCodes.Ldloc_3),
+                il.Create(OpCodes.Ldc_I4_1), // worldPositionStays = true: keeps world position, rotation, and non-distorted scale
+                il.Create(OpCodes.Callvirt, setParentTwo)
+            };
+            for (int i = 0; i < ni.Length; i++) instrs[startIdx + i] = ni[i];
+            for (int i = startIdx + ni.Length; i <= endIdx; i++) { instrs[i].OpCode = OpCodes.Nop; instrs[i].Operand = null; }
+            Console.WriteLine("  + EffectList.Create: ParentConstraint -> transform.SetParent(parent, true) [preserves offset & scale]");
         }
 
         static void ApplyFireDistanceCullV6(TypeDefinition fireType, TypeDefinition playerType, MethodReference mathfMaxFloat, MethodReference getTransformComp, MethodReference getPosition, MethodReference vec3Distance, MethodReference isOwnerMethod, MethodReference opImplicit)
@@ -1275,6 +1557,22 @@ namespace ValheimPatcher
             Console.WriteLine("  + Ragdoll.UpdateFloating: skip when m_float==false");
         }
 
+        static void ApplyRagdollPatchesV7(TypeDefinition ragdollType, MethodReference mathfMinFloat)
+        {
+            var fTtl = FindOrThrow(ragdollType.Fields, f => f.Name == "m_ttl", "Ragdoll.m_ttl");
+            var awake = FindOrThrow(ragdollType.Methods, m => m.Name == "Awake", "Ragdoll.Awake");
+            var il = awake.Body.GetILProcessor();
+            var first = awake.Body.Instructions[0];
+
+            il.InsertBefore(first, il.Create(OpCodes.Ldarg_0));
+            il.InsertBefore(first, il.Create(OpCodes.Ldarg_0));
+            il.InsertBefore(first, il.Create(OpCodes.Ldfld, fTtl));
+            il.InsertBefore(first, il.Create(OpCodes.Ldc_R4, 3.5f));
+            il.InsertBefore(first, il.Create(OpCodes.Call, mathfMinFloat));
+            il.InsertBefore(first, il.Create(OpCodes.Stfld, fTtl));
+            Console.WriteLine("  + Ragdoll.Awake: TTL clamped <= 3.5s (clean PhysX release, no leaks)");
+        }
+
         static void ApplyEffectListFrameLimiterV6(TypeDefinition effectListType, TypeDefinition gameType, TypeDefinition playerType, MethodReference getTransformComp, MethodReference getPosition, MethodReference vec3Distance, MethodReference arrayEmptyGameObject, MethodReference opImplicit)
         {
             var fCount = new FieldDefinition("s_effectsThisFrame", FieldAttributes.Public | FieldAttributes.Static, effectListType.Module.TypeSystem.Int32);
@@ -1322,6 +1620,55 @@ namespace ValheimPatcher
             Console.WriteLine("  + EffectList.Create: frame limiter (<=8 free, 9-14 near only, >14 drop) with Array.Empty & op_Implicit");
         }
 
+        static void ApplyEffectListFrameLimiterV7(TypeDefinition effectListType, TypeDefinition gameType, TypeDefinition playerType, MethodReference getTransformComp, MethodReference getPosition, MethodReference vec3Distance, MethodReference arrayEmptyGameObject, MethodReference opImplicit)
+        {
+            var fCount = new FieldDefinition("s_effectsThisFrame", FieldAttributes.Public | FieldAttributes.Static, effectListType.Module.TypeSystem.Int32);
+            effectListType.Fields.Add(fCount);
+
+            var gameUpdate = FindOrThrow(gameType.Methods, m => m.Name == "Update", "Game.Update");
+            var ilG = gameUpdate.Body.GetILProcessor();
+            var firstG = gameUpdate.Body.Instructions[0];
+            ilG.InsertBefore(firstG, ilG.Create(OpCodes.Ldc_I4_0));
+            ilG.InsertBefore(firstG, ilG.Create(OpCodes.Stsfld, fCount));
+
+            var create = FindOrThrow(effectListType.Methods, m => m.Name == "Create" && m.Parameters.Count == 6, "EffectList.Create(6)");
+            var il = create.Body.GetILProcessor();
+            var firstC = create.Body.Instructions[0];
+            var fLocalPlayer = FindOrThrow(playerType.Fields, f => f.Name == "m_localPlayer", "Player.m_localPlayer");
+
+            il.InsertBefore(firstC, il.Create(OpCodes.Ldsfld, fCount));
+            il.InsertBefore(firstC, il.Create(OpCodes.Ldc_I4_1));
+            il.InsertBefore(firstC, il.Create(OpCodes.Add));
+            il.InsertBefore(firstC, il.Create(OpCodes.Dup));
+            il.InsertBefore(firstC, il.Create(OpCodes.Stsfld, fCount));
+
+            // Free tier: <= 16 effects/frame without distance check
+            il.InsertBefore(firstC, il.Create(OpCodes.Ldc_I4_S, (sbyte)16));
+            il.InsertBefore(firstC, il.Create(OpCodes.Ble_S, firstC));
+
+            var checkHardCap = il.Create(OpCodes.Ldsfld, fCount);
+            var dropLabel = il.Create(OpCodes.Call, arrayEmptyGameObject);
+            il.InsertBefore(firstC, il.Create(OpCodes.Ldsfld, fLocalPlayer));
+            il.InsertBefore(firstC, il.Create(OpCodes.Call, opImplicit));
+            il.InsertBefore(firstC, il.Create(OpCodes.Brfalse_S, checkHardCap));
+            il.InsertBefore(firstC, il.Create(OpCodes.Ldarg_1)); // pos
+            il.InsertBefore(firstC, il.Create(OpCodes.Ldsfld, fLocalPlayer));
+            il.InsertBefore(firstC, il.Create(OpCodes.Call, getTransformComp));
+            il.InsertBefore(firstC, il.Create(OpCodes.Callvirt, getPosition));
+            il.InsertBefore(firstC, il.Create(OpCodes.Call, vec3Distance));
+            il.InsertBefore(firstC, il.Create(OpCodes.Ldc_R4, 45.0f)); // 45m covers full combat and bow range
+            il.InsertBefore(firstC, il.Create(OpCodes.Bgt_S, dropLabel));
+
+            // Hard cap: 32 effects/frame (blocks particle lag in extreme scenarios)
+            il.InsertBefore(firstC, checkHardCap);
+            il.InsertBefore(firstC, il.Create(OpCodes.Ldc_I4_S, (sbyte)32));
+            il.InsertBefore(firstC, il.Create(OpCodes.Ble_S, firstC));
+
+            il.InsertBefore(firstC, dropLabel);
+            il.InsertBefore(firstC, il.Create(OpCodes.Ret));
+            Console.WriteLine("  + EffectList.Create: frame limiter (<=16 free, 17-32 within 45m, >32 drop) with Array.Empty");
+        }
+
         static void ApplyCharacterAnimatorLODV6(TypeDefinition charType, TypeDefinition playerType, MethodReference setCullingMode)
         {
             var awake = FindOrThrow(charType.Methods, m => m.Name == "Awake", "Character.Awake");
@@ -1360,6 +1707,377 @@ namespace ValheimPatcher
             }
         }
 
+        static void ApplyCharacterAnimatorLODV7(TypeDefinition charType, TypeDefinition humanoidType, MethodReference setCullingMode)
+        {
+            var awake = FindOrThrow(charType.Methods, m => m.Name == "Awake", "Character.Awake");
+            var fAnimator = FindOrThrow(charType.Fields, f => f.Name == "m_animator", "Character.m_animator");
+            var fBoss = FindOrThrow(charType.Fields, f => f.Name == "m_boss", "Character.m_boss");
+            var fTamed = FindOrThrow(charType.Fields, f => f.Name == "m_tamed", "Character.m_tamed");
+            var fFaction = FindOrThrow(charType.Fields, f => f.Name == "m_faction", "Character.m_faction");
+            var il = awake.Body.GetILProcessor();
+            int targetIdx = -1;
+            for (int i = 0; i < awake.Body.Instructions.Count; i++)
+                if (awake.Body.Instructions[i].OpCode == OpCodes.Callvirt && awake.Body.Instructions[i].Operand?.ToString()?.Contains("set_logWarnings") == true)
+                { targetIdx = i + 1; break; }
+            if (targetIdx != -1)
+            {
+                var next = awake.Body.Instructions[targetIdx];
+                var cont = il.Create(OpCodes.Nop);
+
+                // Skip Humanoid (Player and all weapon-wielding humanoids)
+                il.InsertBefore(next, il.Create(OpCodes.Ldarg_0));
+                il.InsertBefore(next, il.Create(OpCodes.Isinst, humanoidType));
+                il.InsertBefore(next, il.Create(OpCodes.Brtrue_S, cont));
+
+                // Skip Bosses
+                il.InsertBefore(next, il.Create(OpCodes.Ldarg_0));
+                il.InsertBefore(next, il.Create(OpCodes.Ldfld, fBoss));
+                il.InsertBefore(next, il.Create(OpCodes.Brtrue_S, cont));
+
+                // Skip Tamed pets/mounts
+                il.InsertBefore(next, il.Create(OpCodes.Ldarg_0));
+                il.InsertBefore(next, il.Create(OpCodes.Ldfld, fTamed));
+                il.InsertBefore(next, il.Create(OpCodes.Brtrue_S, cont));
+
+                // Skip combat monsters (only apply to Faction.AnimalsVeg == 1)
+                il.InsertBefore(next, il.Create(OpCodes.Ldarg_0));
+                il.InsertBefore(next, il.Create(OpCodes.Ldfld, fFaction));
+                il.InsertBefore(next, il.Create(OpCodes.Ldc_I4_1)); // AnimalsVeg
+                il.InsertBefore(next, il.Create(OpCodes.Bne_Un_S, cont));
+
+                // Apply CullUpdateTransforms (1) only to ambient wildlife
+                il.InsertBefore(next, il.Create(OpCodes.Ldarg_0));
+                il.InsertBefore(next, il.Create(OpCodes.Ldfld, fAnimator));
+                il.InsertBefore(next, il.Create(OpCodes.Brfalse_S, cont));
+                il.InsertBefore(next, il.Create(OpCodes.Ldarg_0));
+                il.InsertBefore(next, il.Create(OpCodes.Ldfld, fAnimator));
+                il.InsertBefore(next, il.Create(OpCodes.Ldc_I4_1));
+                il.InsertBefore(next, il.Create(OpCodes.Callvirt, setCullingMode));
+                il.InsertBefore(next, cont);
+                Console.WriteLine("  + Character.Awake: Animator LOD applied only to ambient wildlife (combat hitboxes & tamed fully preserved)");
+            }
+        }
+
+        // ==================== V8 PATCH IMPLEMENTATIONS ====================
+
+        static void ApplyWearNTearUpdaterSmoothedV8(TypeDefinition updaterType, TypeDefinition wntType)
+        {
+            var updateCover = FindOrThrow(wntType.Methods, m => m.Name == "UpdateCover" && m.Parameters.Count == 1, "WearNTear.UpdateCover");
+            var updateAshlands = FindOrThrow(wntType.Methods, m => m.Name == "UpdateAshlandsMaterialValues" && m.Parameters.Count == 1, "WearNTear.UpdateAshlandsMaterialValues");
+            var startMethod = FindOrThrow(updaterType.Methods, m => m.Name == "Start", "WearNTearUpdater.Start");
+            var updateMethod = FindOrThrow(updaterType.Methods, m => m.Name == "UpdateWearNTear", "WearNTearUpdater.UpdateWearNTear");
+
+            // Start: call Shader.SetGlobalTexture once
+            var fAshTex = FindOrThrow(updaterType.Fields, f => f.Name == "m_ashlandsWearTexture", "m_ashlandsWearTexture");
+            var fAshProp = FindOrThrow(updaterType.Fields, f => f.Name == "s_ashlandsWearTexture", "s_ashlandsWearTexture");
+            var instSetTex = FindOrThrow(updateMethod.Body.Instructions, i => i.OpCode == OpCodes.Call && i.Operand?.ToString()?.Contains("SetGlobalTexture") == true, "SetGlobalTexture call");
+            var ilStart = startMethod.Body.GetILProcessor();
+            var lastStart = startMethod.Body.Instructions.Last();
+            ilStart.InsertBefore(lastStart, ilStart.Create(OpCodes.Ldsfld, fAshProp));
+            ilStart.InsertBefore(lastStart, ilStart.Create(OpCodes.Ldarg_0));
+            ilStart.InsertBefore(lastStart, ilStart.Create(OpCodes.Ldfld, fAshTex));
+            ilStart.InsertBefore(lastStart, ilStart.Create(OpCodes.Call, (MethodReference)instSetTex.Operand));
+            Console.WriteLine("  + WearNTearUpdater.Start: SetGlobalTexture bound at startup");
+
+            // UpdateWearNTear: bypass 1-second double foreach block
+            for (int i = 0; i < 10; i++)
+            {
+                if (updateMethod.Body.Instructions[i].OpCode == OpCodes.Brfalse)
+                {
+                    updateMethod.Body.Instructions[i].OpCode = OpCodes.Br;
+                    Console.WriteLine("  + WearNTearUpdater.UpdateWearNTear: 1.0s double-foreach spike bypassed");
+                    break;
+                }
+            }
+
+            // Sliced loop: insert UpdateCover & UpdateAshlandsMaterialValues after UpdateWear
+            for (int i = 0; i < updateMethod.Body.Instructions.Count; i++)
+            {
+                var inst = updateMethod.Body.Instructions[i];
+                if (inst.OpCode == OpCodes.Callvirt && inst.Operand?.ToString()?.Contains("UpdateWear") == true)
+                {
+                    var il = updateMethod.Body.GetILProcessor();
+                    var v5 = updateMethod.Body.Variables[5];
+                    var cur = inst;
+                    var i1 = il.Create(OpCodes.Ldloc_S, v5);
+                    var i2 = il.Create(OpCodes.Ldarg_1);
+                    var i3 = il.Create(OpCodes.Callvirt, updateCover);
+                    var i4 = il.Create(OpCodes.Ldloc_S, v5);
+                    var i5 = il.Create(OpCodes.Ldarg_2);
+                    var i6 = il.Create(OpCodes.Callvirt, updateAshlands);
+
+                    il.InsertAfter(cur, i6);
+                    il.InsertAfter(cur, i5);
+                    il.InsertAfter(cur, i4);
+                    il.InsertAfter(cur, i3);
+                    il.InsertAfter(cur, i2);
+                    il.InsertAfter(cur, i1);
+                    Console.WriteLine("  + WearNTearUpdater.UpdateWearNTear: UpdateCover & UpdateAshlandsMaterialValues smoothed across frames");
+                    break;
+                }
+            }
+        }
+
+        static void ApplyHeightmapZeroAllocV8(TypeDefinition hmType)
+        {
+            var rcmMethod = FindOrThrow(hmType.Methods, m => m.Name == "RebuildCollisionMesh", "Heightmap.RebuildCollisionMesh");
+            var rrmMethod = FindOrThrow(hmType.Methods, m => m.Name == "RebuildRenderMesh", "Heightmap.RebuildRenderMesh");
+            var setIndices5 = (MethodReference)FindOrThrow(rrmMethod.Body.Instructions, i => i.OpCode == OpCodes.Callvirt && i.Operand?.ToString()?.Contains("SetIndices") == true && i.Operand?.ToString()?.Contains("List") == true, "SetIndices(List)").Operand;
+
+            for (int i = 0; i < rcmMethod.Body.Instructions.Count; i++)
+            {
+                var inst = rcmMethod.Body.Instructions[i];
+                if (inst.OpCode == OpCodes.Callvirt && inst.Operand?.ToString()?.Contains("ToArray") == true)
+                {
+                    inst.OpCode = OpCodes.Nop;
+                    inst.Operand = null;
+                    var setIndicesOld = rcmMethod.Body.Instructions[i + 3];
+                    setIndicesOld.Operand = setIndices5;
+
+                    var il = rcmMethod.Body.GetILProcessor();
+                    il.InsertBefore(setIndicesOld, il.Create(OpCodes.Ldc_I4_1)); // calculateBounds = true
+                    il.InsertBefore(setIndicesOld, il.Create(OpCodes.Ldc_I4_0)); // baseVertex = 0
+                    Console.WriteLine("  + Heightmap.RebuildCollisionMesh: converted to zero-alloc List<int> (no ToArray)");
+                    break;
+                }
+            }
+        }
+
+        static void ApplyEnemyHudCachingV8(TypeDefinition ehType)
+        {
+            var updateHuds = FindOrThrow(ehType.Methods, m => m.Name == "UpdateHuds", "EnemyHud.UpdateHuds");
+            for (int i = 0; i < updateHuds.Body.Instructions.Count; i++)
+            {
+                var inst = updateHuds.Body.Instructions[i];
+                if (inst.OpCode == OpCodes.Callvirt && inst.Operand?.ToString()?.Contains("set_text") == true &&
+                    updateHuds.Body.Instructions[i - 1].OpCode == OpCodes.Callvirt && updateHuds.Body.Instructions[i - 1].Operand?.ToString()?.Contains("Localize") == true)
+                {
+                    for (int j = i - 7; j <= i; j++)
+                    {
+                        updateHuds.Body.Instructions[j].OpCode = OpCodes.Nop;
+                        updateHuds.Body.Instructions[j].Operand = null;
+                    }
+                    Console.WriteLine("  + EnemyHud.UpdateHuds: redundant per-frame localization eliminated");
+                    break;
+                }
+            }
+        }
+
+        static void ApplyCanvasIsolationV8(TypeDefinition damageTextType, TypeDefinition enemyHudType, MethodReference getGameObject, MethodReference getCompCanvas, MethodReference addCompCanvas)
+        {
+            ApplyCanvasToAwake(damageTextType, getGameObject, getCompCanvas, addCompCanvas);
+            ApplyCanvasToAwake(enemyHudType, getGameObject, getCompCanvas, addCompCanvas);
+            Console.WriteLine("  + DamageText & EnemyHud: Canvas isolation added (sub-canvas prevents main HUD dirtying)");
+        }
+
+        static void ApplyCanvasToAwake(TypeDefinition targetType, MethodReference getGameObject, MethodReference getCompCanvas, MethodReference addCompCanvas)
+        {
+            var awake = FindOrThrow(targetType.Methods, m => m.Name == "Awake", $"{targetType.Name}.Awake");
+            var il = awake.Body.GetILProcessor();
+            var first = awake.Body.Instructions[0];
+
+            il.InsertBefore(first, il.Create(OpCodes.Ldarg_0));
+            il.InsertBefore(first, il.Create(OpCodes.Call, getGameObject));
+            il.InsertBefore(first, il.Create(OpCodes.Callvirt, getCompCanvas));
+            il.InsertBefore(first, il.Create(OpCodes.Brtrue_S, first));
+            il.InsertBefore(first, il.Create(OpCodes.Ldarg_0));
+            il.InsertBefore(first, il.Create(OpCodes.Call, getGameObject));
+            il.InsertBefore(first, il.Create(OpCodes.Callvirt, addCompCanvas));
+            il.InsertBefore(first, il.Create(OpCodes.Pop));
+        }
+
+        static void ApplyInventoryGridCachingV8(TypeDefinition igType, TypeDefinition elemType, TypeDefinition itemDataType)
+        {
+            var module = igType.Module;
+            var fCachedQuality = new FieldDefinition("m_cachedQuality", FieldAttributes.Public, module.TypeSystem.Int32);
+            var fCachedStack = new FieldDefinition("m_cachedStack", FieldAttributes.Public, module.TypeSystem.Int32);
+            elemType.Fields.Add(fCachedQuality);
+            elemType.Fields.Add(fCachedStack);
+
+            var fItemQuality = FindOrThrow(itemDataType.Fields, f => f.Name == "m_quality", "ItemData.m_quality");
+            var fItemStack = FindOrThrow(itemDataType.Fields, f => f.Name == "m_stack", "ItemData.m_stack");
+
+            var ugMethod = FindOrThrow(igType.Methods, m => m.Name == "UpdateGui", "InventoryGrid.UpdateGui");
+            var il = ugMethod.Body.GetILProcessor();
+
+            // Invalidate cache when element is marked unused (branch where !inventoryElement.m_used)
+            for (int i = 0; i < ugMethod.Body.Instructions.Count - 2; i++)
+            {
+                var inst = ugMethod.Body.Instructions[i];
+                if (inst.OpCode == OpCodes.Ldfld && inst.Operand?.ToString()?.Contains("m_used") == true &&
+                    ugMethod.Body.Instructions[i + 1].OpCode == OpCodes.Brtrue)
+                {
+                    var varInst = ugMethod.Body.Instructions[i - 1];
+                    var target = ugMethod.Body.Instructions[i + 2];
+                    if (varInst.Operand is VariableDefinition vElem)
+                    {
+                        il.InsertBefore(target, il.Create(OpCodes.Ldloc_S, vElem));
+                        il.InsertBefore(target, il.Create(OpCodes.Ldc_I4_M1));
+                        il.InsertBefore(target, il.Create(OpCodes.Stfld, fCachedQuality));
+                        il.InsertBefore(target, il.Create(OpCodes.Ldloc_S, vElem));
+                        il.InsertBefore(target, il.Create(OpCodes.Ldc_I4_M1));
+                        il.InsertBefore(target, il.Create(OpCodes.Stfld, fCachedStack));
+                        Console.WriteLine("  + InventoryGrid.UpdateGui: slot cache invalidation injected");
+                        break;
+                    }
+                }
+            }
+
+            // Quality caching
+            for (int i = 0; i < ugMethod.Body.Instructions.Count; i++)
+            {
+                var inst = ugMethod.Body.Instructions[i];
+                if (inst.OpCode == OpCodes.Callvirt && inst.Operand?.ToString()?.Contains("set_text") == true &&
+                    ugMethod.Body.Instructions[i - 1].OpCode == OpCodes.Call && ugMethod.Body.Instructions[i - 1].Operand?.ToString()?.Contains("ToString") == true)
+                {
+                    var startQual = ugMethod.Body.Instructions[i - 5];
+                    var skipQualTarget = ugMethod.Body.Instructions[i + 1];
+                    var v16 = ugMethod.Body.Variables[16];
+                    var v17 = ugMethod.Body.Variables[17];
+
+                    var c1 = il.Create(OpCodes.Ldloc_S, v17);
+                    var c2 = il.Create(OpCodes.Ldfld, fCachedQuality);
+                    var c3 = il.Create(OpCodes.Ldloc_S, v16);
+                    var c4 = il.Create(OpCodes.Ldfld, fItemQuality);
+                    var c5 = il.Create(OpCodes.Beq_S, skipQualTarget);
+                    var c6 = il.Create(OpCodes.Ldloc_S, v17);
+                    var c7 = il.Create(OpCodes.Ldloc_S, v16);
+                    var c8 = il.Create(OpCodes.Ldfld, fItemQuality);
+                    var c9 = il.Create(OpCodes.Stfld, fCachedQuality);
+
+                    il.InsertBefore(startQual, c1);
+                    il.InsertBefore(startQual, c2);
+                    il.InsertBefore(startQual, c3);
+                    il.InsertBefore(startQual, c4);
+                    il.InsertBefore(startQual, c5);
+                    il.InsertBefore(startQual, c6);
+                    il.InsertBefore(startQual, c7);
+                    il.InsertBefore(startQual, c8);
+                    il.InsertBefore(startQual, c9);
+                    Console.WriteLine("  + InventoryGrid.UpdateGui: m_quality caching injected");
+                    break;
+                }
+            }
+
+            // Amount caching
+            for (int i = 0; i < ugMethod.Body.Instructions.Count; i++)
+            {
+                var inst = ugMethod.Body.Instructions[i];
+                if (inst.OpCode == OpCodes.Callvirt && inst.Operand?.ToString()?.Contains("set_text") == true &&
+                    ugMethod.Body.Instructions[i - 1].OpCode == OpCodes.Call && ugMethod.Body.Instructions[i - 1].Operand?.ToString()?.Contains("Format") == true)
+                {
+                    var startAmt = ugMethod.Body.Instructions[i - 11];
+                    var skipAmtTarget = ugMethod.Body.Instructions[i + 1];
+                    var v16 = ugMethod.Body.Variables[16];
+                    var v17 = ugMethod.Body.Variables[17];
+
+                    var c1 = il.Create(OpCodes.Ldloc_S, v17);
+                    var c2 = il.Create(OpCodes.Ldfld, fCachedStack);
+                    var c3 = il.Create(OpCodes.Ldloc_S, v16);
+                    var c4 = il.Create(OpCodes.Ldfld, fItemStack);
+                    var c5 = il.Create(OpCodes.Beq_S, skipAmtTarget);
+                    var c6 = il.Create(OpCodes.Ldloc_S, v17);
+                    var c7 = il.Create(OpCodes.Ldloc_S, v16);
+                    var c8 = il.Create(OpCodes.Ldfld, fItemStack);
+                    var c9 = il.Create(OpCodes.Stfld, fCachedStack);
+
+                    il.InsertBefore(startAmt, c1);
+                    il.InsertBefore(startAmt, c2);
+                    il.InsertBefore(startAmt, c3);
+                    il.InsertBefore(startAmt, c4);
+                    il.InsertBefore(startAmt, c5);
+                    il.InsertBefore(startAmt, c6);
+                    il.InsertBefore(startAmt, c7);
+                    il.InsertBefore(startAmt, c8);
+                    il.InsertBefore(startAmt, c9);
+                    Console.WriteLine("  + InventoryGrid.UpdateGui: m_stack caching injected");
+                    break;
+                }
+            }
+        }
+
+        static void ApplyPathfindingZeroAllocV8(TypeDefinition pfType, TypeDefinition navMeshPathType, TypeDefinition vec3Type, MethodReference getCornersNonAlloc)
+        {
+            var module = pfType.Module;
+            var vec3ArrayType = new ArrayType(module.ImportReference(vec3Type));
+            var fCornerBuf = new FieldDefinition("s_cornerBuffer", FieldAttributes.Public | FieldAttributes.Static, vec3ArrayType);
+            pfType.Fields.Add(fCornerBuf);
+
+            var getPath = FindOrThrow(pfType.Methods, m => m.Name == "GetPath" && m.Parameters.Count == 7, "Pathfinding.GetPath(7)");
+            var listVec3Type = getPath.Parameters[2].ParameterType;
+            var addVec3Method = module.ImportReference(new MethodReference("Add", module.TypeSystem.Void, listVec3Type) { HasThis = true });
+            addVec3Method.Parameters.Add(new ParameterDefinition("item", ParameterAttributes.None, module.ImportReference(vec3Type)));
+
+            var helper = new MethodDefinition("AddCornersNonAlloc", MethodAttributes.Public | MethodAttributes.Static | MethodAttributes.HideBySig, module.TypeSystem.Void);
+            helper.Parameters.Add(new ParameterDefinition("navPath", ParameterAttributes.None, module.ImportReference(navMeshPathType)));
+            helper.Parameters.Add(new ParameterDefinition("list", ParameterAttributes.None, listVec3Type));
+
+            var il = helper.Body.GetILProcessor();
+            helper.Body.Variables.Add(new VariableDefinition(module.TypeSystem.Int32)); // V_0: count
+            helper.Body.Variables.Add(new VariableDefinition(module.TypeSystem.Int32)); // V_1: i
+
+            var initBuf = il.Create(OpCodes.Ldc_I4_0);
+            var loopEnd = il.Create(OpCodes.Ret);
+
+            il.Append(il.Create(OpCodes.Ldsfld, fCornerBuf));
+            il.Append(il.Create(OpCodes.Brtrue_S, initBuf));
+            il.Append(il.Create(OpCodes.Ldc_I4, 128));
+            il.Append(il.Create(OpCodes.Newarr, module.ImportReference(vec3Type)));
+            il.Append(il.Create(OpCodes.Stsfld, fCornerBuf));
+
+            il.Append(initBuf);
+            il.Append(il.Create(OpCodes.Pop));
+            il.Append(il.Create(OpCodes.Ldarg_0));
+            il.Append(il.Create(OpCodes.Ldsfld, fCornerBuf));
+            il.Append(il.Create(OpCodes.Callvirt, getCornersNonAlloc));
+            il.Append(il.Create(OpCodes.Stloc_0));
+
+            il.Append(il.Create(OpCodes.Ldc_I4_0));
+            il.Append(il.Create(OpCodes.Stloc_1));
+
+            var loopCheck = il.Create(OpCodes.Ldloc_1);
+            il.Append(il.Create(OpCodes.Br_S, loopCheck));
+
+            var loopBody = il.Create(OpCodes.Ldarg_1);
+            il.Append(loopBody);
+            il.Append(il.Create(OpCodes.Ldsfld, fCornerBuf));
+            il.Append(il.Create(OpCodes.Ldloc_1));
+            il.Append(il.Create(OpCodes.Ldelem_Any, module.ImportReference(vec3Type)));
+            il.Append(il.Create(OpCodes.Callvirt, addVec3Method));
+            il.Append(il.Create(OpCodes.Ldloc_1));
+            il.Append(il.Create(OpCodes.Ldc_I4_1));
+            il.Append(il.Create(OpCodes.Add));
+            il.Append(il.Create(OpCodes.Stloc_1));
+
+            il.Append(loopCheck);
+            il.Append(il.Create(OpCodes.Ldloc_0));
+            il.Append(il.Create(OpCodes.Blt_S, loopBody));
+            il.Append(loopEnd);
+
+            pfType.Methods.Add(helper);
+
+            for (int i = 0; i < getPath.Body.Instructions.Count; i++)
+            {
+                var inst = getPath.Body.Instructions[i];
+                if (inst.OpCode == OpCodes.Callvirt && inst.Operand?.ToString()?.Contains("AddRange") == true &&
+                    getPath.Body.Instructions[i - 1].OpCode == OpCodes.Callvirt && getPath.Body.Instructions[i - 1].Operand?.ToString()?.Contains("get_corners") == true)
+                {
+                    getPath.Body.Instructions[i - 4].OpCode = OpCodes.Ldarg_0;
+                    getPath.Body.Instructions[i - 4].Operand = null;
+                    getPath.Body.Instructions[i - 3].OpCode = OpCodes.Ldfld;
+                    getPath.Body.Instructions[i - 3].Operand = getPath.Body.Instructions[i - 2].Operand;
+                    getPath.Body.Instructions[i - 2].OpCode = OpCodes.Ldarg_3;
+                    getPath.Body.Instructions[i - 2].Operand = null;
+                    getPath.Body.Instructions[i - 1].OpCode = OpCodes.Call;
+                    getPath.Body.Instructions[i - 1].Operand = helper;
+                    getPath.Body.Instructions[i].OpCode = OpCodes.Nop;
+                    getPath.Body.Instructions[i].Operand = null;
+                    Console.WriteLine("  + Pathfinding.GetPath: AddRange(m_path.corners) replaced with AddCornersNonAlloc");
+                    break;
+                }
+            }
+        }
+
         // ==================== VERIFICATION ENGINE ====================
 
         static int VerifyPatches(string dllPath, string managedDir, PatchVersion? targetVer)
@@ -1381,13 +2099,19 @@ namespace ValheimPatcher
                 return 0;
             }
 
-            PatchVersion detected = marker.Name == MarkerFieldNameV5 ? PatchVersion.V5 : PatchVersion.V6;
+            PatchVersion detected = marker.Name switch
+            {
+                MarkerFieldNameV5 => PatchVersion.V5,
+                MarkerFieldNameV6 => PatchVersion.V6,
+                MarkerFieldNameV7 => PatchVersion.V7,
+                _ => PatchVersion.V8
+            };
             PatchVersion verToVerify = targetVer ?? detected;
 
             Console.WriteLine($"Detected marker: {marker.Name} -> verifying against {verToVerify.ToString().ToLower()} ruleset...\n");
 
             int checksPassed = 0;
-            int totalChecks = verToVerify == PatchVersion.V6 ? 9 : 8;
+            int totalChecks = verToVerify == PatchVersion.V8 ? 16 : (verToVerify == PatchVersion.V7 ? 10 : (verToVerify == PatchVersion.V6 ? 9 : 8));
 
             void AssertCheck(bool condition, string name, string details)
             {
@@ -1405,7 +2129,160 @@ namespace ValheimPatcher
                 Console.ResetColor();
             }
 
-            if (verToVerify == PatchVersion.V6)
+            if (verToVerify == PatchVersion.V8)
+            {
+                // 1. Marker check
+                AssertCheck(marker.Name == MarkerFieldNameV8, "Marker v8", $"Found marker {marker.Name}");
+
+                // 2. WearNTear.UpdateWear safety: ShouldUpdateSupport guards the block and skips HaveSupport on non-update frames
+                var updateWear = FindOrThrow(wnt.Methods, m => m.Name == "UpdateWear", "WearNTear.UpdateWear");
+                bool wntGuardsBlock = updateWear.Body.Instructions.Any(i => i.OpCode == OpCodes.Call && i.Operand?.ToString()?.Contains("ShouldUpdateSupport") == true)
+                                      && updateWear.Body.Instructions.Any(i => i.OpCode == OpCodes.Brfalse);
+                AssertCheck(wntGuardsBlock, "P0 WearNTear UpdateWear Safety", "Skips entire support & destruction check on non-updating frames");
+
+                // 3. WearNTear.ShouldUpdateSupport cache check: calls get_Count
+                var shouldUpdate = FindOrThrow(wnt.Methods, m => m.Name == "ShouldUpdateSupport", "WearNTear.ShouldUpdateSupport");
+                bool suChecksCount = shouldUpdate.Body.Instructions.Any(i => i.OpCode == OpCodes.Callvirt && i.Operand?.ToString()?.Contains("get_Count") == true);
+                AssertCheck(suChecksCount, "P0 WearNTear Empty Cache Detection", "Checks m_supportColliders.Count == 0 to force update on cleared cache");
+
+                // 4. WearNTear.HaveSupport: clean vanilla integrity (no 100f hardcode)
+                var haveSupport = FindOrThrow(wnt.Methods, m => m.Name == "HaveSupport", "WearNTear.HaveSupport");
+                bool hsIsClean = !haveSupport.Body.Instructions.Any(i => i.OpCode == OpCodes.Ldc_R4 && (float)i.Operand == 100.0f);
+                AssertCheck(hsIsClean, "P0 WearNTear Structural Mechanics", "Preserved vanilla GetMinSupport check for stone/iron/marble");
+
+                // 5. WearNTearUpdater spike elimination: 1.0s double foreach bypassed, UpdateCover sliced
+                var updater = FindOrThrow(module.Types, t => t.Name == "WearNTearUpdater", "WearNTearUpdater");
+                var unwnt = FindOrThrow(updater.Methods, m => m.Name == "UpdateWearNTear", "WearNTearUpdater.UpdateWearNTear");
+                bool updaterBypassesSpike = unwnt.Body.Instructions.Take(10).Any(i => i.OpCode == OpCodes.Br);
+                bool updaterSlicesCover = unwnt.Body.Instructions.Any(i => i.OpCode == OpCodes.Callvirt && i.Operand?.ToString()?.Contains("UpdateCover") == true);
+                AssertCheck(updaterBypassesSpike && updaterSlicesCover, "P0 WearNTearUpdater Spike Elimination", "1.0s double-foreach bypassed, UpdateCover & material updates smoothly sliced");
+
+                // 6. Heightmap RebuildCollisionMesh zero-alloc List<int>
+                var hm = FindOrThrow(module.Types, t => t.Name == "Heightmap", "Heightmap");
+                var rcm = FindOrThrow(hm.Methods, m => m.Name == "RebuildCollisionMesh", "Heightmap.RebuildCollisionMesh");
+                bool rcmNoToArray = !rcm.Body.Instructions.Any(i => i.OpCode == OpCodes.Callvirt && i.Operand?.ToString()?.Contains("ToArray") == true);
+                bool rcmUsesList = rcm.Body.Instructions.Any(i => i.OpCode == OpCodes.Callvirt && i.Operand?.ToString()?.Contains("SetIndices") == true && i.Operand?.ToString()?.Contains("List") == true);
+                AssertCheck(rcmNoToArray && rcmUsesList, "P1 Heightmap Zero-Alloc Collision Mesh", "RebuildCollisionMesh uses List<int> without ToArray() heap allocation");
+
+                // 7. Character.Awake combat preservation
+                var character = FindOrThrow(module.Types, t => t.Name == "Character", "Character");
+                var charAwake = FindOrThrow(character.Methods, m => m.Name == "Awake", "Character.Awake");
+                bool charProtectsCombat = charAwake.Body.Instructions.Any(i => i.OpCode == OpCodes.Isinst && i.Operand?.ToString()?.Contains("Humanoid") == true)
+                                       && charAwake.Body.Instructions.Any(i => i.OpCode == OpCodes.Ldfld && i.Operand?.ToString()?.Contains("m_tamed") == true);
+                AssertCheck(charProtectsCombat, "P0/P1 Combat Hitbox Preservation", "Excludes all Humanoids, Bosses, and Tamed pets from CullUpdateTransforms");
+
+                // 8. EffectList SetParent(parent, true)
+                var effectList = FindOrThrow(module.Types, t => t.Name == "EffectList", "EffectList");
+                var create = FindOrThrow(effectList.Methods, m => m.Name == "Create" && m.Parameters.Count == 6, "EffectList.Create");
+                bool elUsesSetParentTrue = create.Body.Instructions.Any(i => i.OpCode == OpCodes.Ldc_I4_1)
+                                        && create.Body.Instructions.Any(i => i.OpCode == OpCodes.Callvirt && i.Operand?.ToString()?.Contains("SetParent(UnityEngine.Transform,System.Boolean)") == true);
+                AssertCheck(elUsesSetParentTrue, "P1 EffectList Transform Integrity", "Uses SetParent(parent, true) preserving world position, rotation and scale");
+
+                // 9. EffectList 45m range threshold
+                bool elExtendedRange = create.Body.Instructions.Any(i => i.OpCode == OpCodes.Ldc_R4 && (float)i.Operand == 45.0f);
+                AssertCheck(elExtendedRange, "P1 EffectList Combat Range", "45m distance threshold preserves archery sounds and combat particles");
+
+                // 10. ClutterSystem Off == 0.0m
+                var clutter = FindOrThrow(module.Types, t => t.Name == "ClutterSystem", "ClutterSystem");
+                var applySettings = FindOrThrow(clutter.Methods, m => m.Name == "ApplySettings", "ClutterSystem.ApplySettings");
+                bool clutterHandlesOff = applySettings.Body.Instructions.Any(i => i.OpCode == OpCodes.Ldc_R4 && (float)i.Operand == 0.0f);
+                AssertCheck(clutterHandlesOff, "P1 ClutterSystem Quality Logic", "Sets 0m vegetation distance when Quality is Off");
+
+                // 11. UI Canvas isolation for DamageText & EnemyHud
+                var dmgText = FindOrThrow(module.Types, t => t.Name == "DamageText", "DamageText");
+                var enemyHud = FindOrThrow(module.Types, t => t.Name == "EnemyHud", "EnemyHud");
+                var dtAwake = FindOrThrow(dmgText.Methods, m => m.Name == "Awake", "DamageText.Awake");
+                var ehAwake = FindOrThrow(enemyHud.Methods, m => m.Name == "Awake", "EnemyHud.Awake");
+                bool canvasIso = dtAwake.Body.Instructions.Any(i => i.Operand?.ToString()?.Contains("Canvas") == true)
+                              && ehAwake.Body.Instructions.Any(i => i.Operand?.ToString()?.Contains("Canvas") == true);
+                AssertCheck(canvasIso, "P1 UI Canvas Isolation", "DamageText and EnemyHud isolated into sub-canvases to protect main 3K HUD");
+
+                // 12. EnemyHud hover text optimization
+                var updateHuds = FindOrThrow(enemyHud.Methods, m => m.Name == "UpdateHuds", "EnemyHud.UpdateHuds");
+                bool ehNoPerFrameLocalize = !updateHuds.Body.Instructions.Any(i => i.OpCode == OpCodes.Callvirt && i.Operand?.ToString()?.Contains("GetHoverName") == true);
+                AssertCheck(ehNoPerFrameLocalize, "P1 EnemyHud Hover Optimization", "Eliminated redundant per-frame Localization.Localize & set_text in UpdateHuds");
+
+                // 13. InventoryGrid slot text caching
+                var invElem = FindOrThrow(module.Types, t => t.Name == "InventoryElement", "InventoryElement");
+                bool invElemHasCache = invElem.Fields.Any(f => f.Name == "m_cachedStack") && invElem.Fields.Any(f => f.Name == "m_cachedQuality");
+                var invGrid = FindOrThrow(module.Types, t => t.Name == "InventoryGrid", "InventoryGrid");
+                var updateGui = FindOrThrow(invGrid.Methods, m => m.Name == "UpdateGui", "InventoryGrid.UpdateGui");
+                bool updateGuiChecksCache = updateGui.Body.Instructions.Any(i => i.Operand?.ToString()?.Contains("m_cachedStack") == true);
+                AssertCheck(invElemHasCache && updateGuiChecksCache, "P1 InventoryGrid Slot Text Caching", "m_cachedStack & m_cachedQuality bypass per-frame formatting & TMP mesh regeneration");
+
+                // 14. Pathfinding zero-alloc corners
+                var pf = FindOrThrow(module.Types, t => t.Name == "Pathfinding", "Pathfinding");
+                bool pfHasHelper = pf.Methods.Any(m => m.Name == "AddCornersNonAlloc");
+                var pfGetPath = FindOrThrow(pf.Methods, m => m.Name == "GetPath" && m.Parameters.Count == 7, "Pathfinding.GetPath");
+                bool pfUsesHelper = pfGetPath.Body.Instructions.Any(i => i.OpCode == OpCodes.Call && i.Operand?.ToString()?.Contains("AddCornersNonAlloc") == true);
+                AssertCheck(pfHasHelper && pfUsesHelper, "P1 Pathfinding Zero-Alloc", "GetPath queries use AddCornersNonAlloc with 128-element buffer (0 heap arrays)");
+
+                // 15. Ragdoll safety
+                var ragdoll = FindOrThrow(module.Types, t => t.Name == "Ragdoll", "Ragdoll");
+                bool ragdollNoLeak = !ragdoll.Fields.Any(f => f.Name == "s_activeRagdolls");
+                var ragdollAwake = FindOrThrow(ragdoll.Methods, m => m.Name == "Awake", "Ragdoll.Awake");
+                bool ragdollClampsTtl = ragdollAwake.Body.Instructions.Any(i => i.OpCode == OpCodes.Ldc_R4 && (float)i.Operand <= 3.5f);
+                AssertCheck(ragdollNoLeak && ragdollClampsTtl, "P2 Ragdoll Safety", "Clean PhysX release at TTL<=3.5s with zero static buffer leak");
+
+                // 16. All subsystems verified
+                AssertCheck(checksPassed == totalChecks - 1, "Overall Integrity", $"All {checksPassed}/{totalChecks - 1} subsystem audits passed successfully!");
+            }
+            else if (verToVerify == PatchVersion.V7)
+            {
+                // 1. Marker check
+                AssertCheck(marker.Name == MarkerFieldNameV7, "Marker v7", $"Found marker {marker.Name}");
+
+                // 2. WearNTear.UpdateWear safety: ShouldUpdateSupport guards the block and skips HaveSupport on non-update frames
+                var updateWear = FindOrThrow(wnt.Methods, m => m.Name == "UpdateWear", "WearNTear.UpdateWear");
+                bool wntGuardsBlock = updateWear.Body.Instructions.Any(i => i.OpCode == OpCodes.Call && i.Operand?.ToString()?.Contains("ShouldUpdateSupport") == true)
+                                      && updateWear.Body.Instructions.Any(i => i.OpCode == OpCodes.Brfalse);
+                AssertCheck(wntGuardsBlock, "P0 WearNTear UpdateWear Safety", "Skips entire support & destruction check on non-updating frames");
+
+                // 3. WearNTear.ShouldUpdateSupport cache check: calls get_Count
+                var shouldUpdate = FindOrThrow(wnt.Methods, m => m.Name == "ShouldUpdateSupport", "WearNTear.ShouldUpdateSupport");
+                bool suChecksCount = shouldUpdate.Body.Instructions.Any(i => i.OpCode == OpCodes.Callvirt && i.Operand?.ToString()?.Contains("get_Count") == true);
+                AssertCheck(suChecksCount, "P0 WearNTear Empty Cache Detection", "Checks m_supportColliders.Count == 0 to force update on cleared cache");
+
+                // 4. WearNTear.HaveSupport: clean vanilla integrity (no 100f hardcode)
+                var haveSupport = FindOrThrow(wnt.Methods, m => m.Name == "HaveSupport", "WearNTear.HaveSupport");
+                bool hsIsClean = !haveSupport.Body.Instructions.Any(i => i.OpCode == OpCodes.Ldc_R4 && (float)i.Operand == 100.0f);
+                AssertCheck(hsIsClean, "P0 WearNTear Structural Mechanics", "Preserved vanilla GetMinSupport check for stone/iron/marble");
+
+                // 5. ClutterSystem.ApplySettings: properly handles Quality.Off (0.0f)
+                var clutter = FindOrThrow(module.Types, t => t.Name == "ClutterSystem", "ClutterSystem");
+                var applySettings = FindOrThrow(clutter.Methods, m => m.Name == "ApplySettings", "ClutterSystem.ApplySettings");
+                bool clutterHandlesOff = applySettings.Body.Instructions.Any(i => i.OpCode == OpCodes.Ldc_R4 && (float)i.Operand == 0.0f);
+                AssertCheck(clutterHandlesOff, "P1 ClutterSystem Quality Logic", "Sets 0m vegetation distance when Quality is Off");
+
+                // 6. Character.Awake: excludes Humanoids (Player and all weapon-wielding monsters) from animator transform culling
+                var character = FindOrThrow(module.Types, t => t.Name == "Character", "Character");
+                var charAwake = FindOrThrow(character.Methods, m => m.Name == "Awake", "Character.Awake");
+                bool charProtectsHumanoids = charAwake.Body.Instructions.Any(i => i.OpCode == OpCodes.Isinst && i.Operand?.ToString()?.Contains("Humanoid") == true)
+                                          && charAwake.Body.Instructions.Any(i => i.OpCode == OpCodes.Ldfld && i.Operand?.ToString()?.Contains("m_tamed") == true);
+                AssertCheck(charProtectsHumanoids, "P0/P1 Combat Hitbox Preservation", "Excludes all Humanoids, Bosses, and Tamed pets from CullUpdateTransforms");
+
+                // 7. EffectList.Create: uses SetParent(parent, true) to keep scale and offsets
+                var effectList = FindOrThrow(module.Types, t => t.Name == "EffectList", "EffectList");
+                var create = FindOrThrow(effectList.Methods, m => m.Name == "Create" && m.Parameters.Count == 6, "EffectList.Create");
+                bool elUsesSetParentTrue = create.Body.Instructions.Any(i => i.OpCode == OpCodes.Ldc_I4_1)
+                                        && create.Body.Instructions.Any(i => i.OpCode == OpCodes.Callvirt && i.Operand?.ToString()?.Contains("SetParent(UnityEngine.Transform,System.Boolean)") == true);
+                AssertCheck(elUsesSetParentTrue, "P1 EffectList Transform Integrity", "Uses SetParent(parent, true) preserving world position, rotation and scale");
+
+                // 8. EffectList.Create: extended 45m range limiter
+                bool elExtendedRange = create.Body.Instructions.Any(i => i.OpCode == OpCodes.Ldc_R4 && (float)i.Operand == 45.0f);
+                AssertCheck(elExtendedRange, "P1 EffectList Combat Range", "45m distance threshold preserves archery sounds and combat particles");
+
+                // 9. Ragdoll: clean TTL <= 3.5s without static memory leak
+                var ragdoll = FindOrThrow(module.Types, t => t.Name == "Ragdoll", "Ragdoll");
+                bool ragdollNoLeak = !ragdoll.Fields.Any(f => f.Name == "s_activeRagdolls");
+                var ragdollAwake = FindOrThrow(ragdoll.Methods, m => m.Name == "Awake", "Ragdoll.Awake");
+                bool ragdollClampsTtl = ragdollAwake.Body.Instructions.Any(i => i.OpCode == OpCodes.Ldc_R4 && (float)i.Operand <= 3.5f);
+                AssertCheck(ragdollNoLeak && ragdollClampsTtl, "P2 Ragdoll Safety", "Clean PhysX release at TTL<=3.5s with zero static buffer leak");
+
+                // 10. All subsystems verified
+                AssertCheck(checksPassed == totalChecks - 1, "Overall Integrity", $"All {checksPassed}/{totalChecks - 1} subsystem audits passed successfully!");
+            }
+            else if (verToVerify == PatchVersion.V6)
             {
                 // 1. Marker check
                 AssertCheck(marker.Name == MarkerFieldNameV6, "Marker v6", $"Found marker {marker.Name}");
