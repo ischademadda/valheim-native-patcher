@@ -5,6 +5,7 @@ using System.Linq;
 using System.Security.Cryptography;
 using Mono.Cecil;
 using Mono.Cecil.Cil;
+using Mono.Cecil.Rocks;
 
 namespace ValheimPatcher
 {
@@ -43,7 +44,7 @@ namespace ValheimPatcher
 
         static int Main(string[] args)
         {
-            PatchVersion targetVersion = PatchVersion.V7;
+            PatchVersion targetVersion = PatchVersion.V8;
             bool restoreMode = false;
             bool statusMode = false;
             bool verifyMode = false;
@@ -1778,11 +1779,13 @@ namespace ValheimPatcher
         static void ApplyEnemyHudCachingV8(TypeDefinition ehType)
         {
             var updateHuds = FindOrThrow(ehType.Methods, m => m.Name == "UpdateHuds", "EnemyHud.UpdateHuds");
+            updateHuds.Body.SimplifyMacros();
+
             for (int i = 0; i < updateHuds.Body.Instructions.Count; i++)
             {
                 var inst = updateHuds.Body.Instructions[i];
                 if (inst.OpCode == OpCodes.Callvirt && inst.Operand?.ToString()?.Contains("set_text") == true &&
-                    updateHuds.Body.Instructions[i - 1].OpCode == OpCodes.Callvirt && updateHuds.Body.Instructions[i - 1].Operand?.ToString()?.Contains("Localize") == true)
+                    updateHuds.Body.Instructions[i - 1].Operand?.ToString()?.Contains("Localize") == true)
                 {
                     for (int j = i - 7; j <= i; j++)
                     {
@@ -1793,6 +1796,8 @@ namespace ValheimPatcher
                     break;
                 }
             }
+
+            updateHuds.Body.OptimizeMacros();
         }
 
         static void ApplyInventoryGridCachingV8(TypeDefinition igType, TypeDefinition elemType, TypeDefinition itemDataType)
@@ -1807,6 +1812,7 @@ namespace ValheimPatcher
             var fItemStack = FindOrThrow(itemDataType.Fields, f => f.Name == "m_stack", "ItemData.m_stack");
 
             var ugMethod = FindOrThrow(igType.Methods, m => m.Name == "UpdateGui", "InventoryGrid.UpdateGui");
+            ugMethod.Body.SimplifyMacros();
             var il = ugMethod.Body.GetILProcessor();
 
             // Invalidate cache when element is marked unused (branch where !inventoryElement.m_used)
@@ -1820,11 +1826,11 @@ namespace ValheimPatcher
                     var target = ugMethod.Body.Instructions[i + 2];
                     if (varInst.Operand is VariableDefinition vElem)
                     {
-                        il.InsertBefore(target, il.Create(OpCodes.Ldloc_S, vElem));
-                        il.InsertBefore(target, il.Create(OpCodes.Ldc_I4_M1));
+                        il.InsertBefore(target, il.Create(OpCodes.Ldloc, vElem));
+                        il.InsertBefore(target, il.Create(OpCodes.Ldc_I4, -1));
                         il.InsertBefore(target, il.Create(OpCodes.Stfld, fCachedQuality));
-                        il.InsertBefore(target, il.Create(OpCodes.Ldloc_S, vElem));
-                        il.InsertBefore(target, il.Create(OpCodes.Ldc_I4_M1));
+                        il.InsertBefore(target, il.Create(OpCodes.Ldloc, vElem));
+                        il.InsertBefore(target, il.Create(OpCodes.Ldc_I4, -1));
                         il.InsertBefore(target, il.Create(OpCodes.Stfld, fCachedStack));
                         Console.WriteLine("  + InventoryGrid.UpdateGui: slot cache invalidation injected");
                         break;
@@ -1844,13 +1850,13 @@ namespace ValheimPatcher
                     var v16 = ugMethod.Body.Variables[16];
                     var v17 = ugMethod.Body.Variables[17];
 
-                    var c1 = il.Create(OpCodes.Ldloc_S, v17);
+                    var c1 = il.Create(OpCodes.Ldloc, v17);
                     var c2 = il.Create(OpCodes.Ldfld, fCachedQuality);
-                    var c3 = il.Create(OpCodes.Ldloc_S, v16);
+                    var c3 = il.Create(OpCodes.Ldloc, v16);
                     var c4 = il.Create(OpCodes.Ldfld, fItemQuality);
-                    var c5 = il.Create(OpCodes.Beq_S, skipQualTarget);
-                    var c6 = il.Create(OpCodes.Ldloc_S, v17);
-                    var c7 = il.Create(OpCodes.Ldloc_S, v16);
+                    var c5 = il.Create(OpCodes.Beq, skipQualTarget);
+                    var c6 = il.Create(OpCodes.Ldloc, v17);
+                    var c7 = il.Create(OpCodes.Ldloc, v16);
                     var c8 = il.Create(OpCodes.Ldfld, fItemQuality);
                     var c9 = il.Create(OpCodes.Stfld, fCachedQuality);
 
@@ -1880,13 +1886,13 @@ namespace ValheimPatcher
                     var v16 = ugMethod.Body.Variables[16];
                     var v17 = ugMethod.Body.Variables[17];
 
-                    var c1 = il.Create(OpCodes.Ldloc_S, v17);
+                    var c1 = il.Create(OpCodes.Ldloc, v17);
                     var c2 = il.Create(OpCodes.Ldfld, fCachedStack);
-                    var c3 = il.Create(OpCodes.Ldloc_S, v16);
+                    var c3 = il.Create(OpCodes.Ldloc, v16);
                     var c4 = il.Create(OpCodes.Ldfld, fItemStack);
-                    var c5 = il.Create(OpCodes.Beq_S, skipAmtTarget);
-                    var c6 = il.Create(OpCodes.Ldloc_S, v17);
-                    var c7 = il.Create(OpCodes.Ldloc_S, v16);
+                    var c5 = il.Create(OpCodes.Beq, skipAmtTarget);
+                    var c6 = il.Create(OpCodes.Ldloc, v17);
+                    var c7 = il.Create(OpCodes.Ldloc, v16);
                     var c8 = il.Create(OpCodes.Ldfld, fItemStack);
                     var c9 = il.Create(OpCodes.Stfld, fCachedStack);
 
@@ -1903,6 +1909,8 @@ namespace ValheimPatcher
                     break;
                 }
             }
+
+            ugMethod.Body.OptimizeMacros();
         }
 
         static void ApplyPathfindingZeroAllocV8(TypeDefinition pfType, TypeDefinition navMeshPathType, TypeDefinition vec3Type, MethodReference getCornersNonAlloc)
@@ -1914,8 +1922,10 @@ namespace ValheimPatcher
 
             var getPath = FindOrThrow(pfType.Methods, m => m.Name == "GetPath" && m.Parameters.Count == 7, "Pathfinding.GetPath(7)");
             var listVec3Type = getPath.Parameters[2].ParameterType;
-            var addVec3Method = module.ImportReference(new MethodReference("Add", module.TypeSystem.Void, listVec3Type) { HasThis = true });
-            addVec3Method.Parameters.Add(new ParameterDefinition("item", ParameterAttributes.None, module.ImportReference(vec3Type)));
+
+            // Borrow exact imported Add method from CleanPath
+            var cleanPath = FindOrThrow(pfType.Methods, m => m.Name == "CleanPath", "Pathfinding.CleanPath");
+            var addVec3Method = (MethodReference)FindOrThrow(cleanPath.Body.Instructions, i => i.Operand is MethodReference mr && mr.Name == "Add" && mr.DeclaringType.FullName.Contains("List`1<UnityEngine.Vector3>"), "List<Vector3>.Add").Operand;
 
             var helper = new MethodDefinition("AddCornersNonAlloc", MethodAttributes.Public | MethodAttributes.Static | MethodAttributes.HideBySig, module.TypeSystem.Void);
             helper.Parameters.Add(new ParameterDefinition("navPath", ParameterAttributes.None, module.ImportReference(navMeshPathType)));
@@ -1929,7 +1939,7 @@ namespace ValheimPatcher
             var loopEnd = il.Create(OpCodes.Ret);
 
             il.Append(il.Create(OpCodes.Ldsfld, fCornerBuf));
-            il.Append(il.Create(OpCodes.Brtrue_S, initBuf));
+            il.Append(il.Create(OpCodes.Brtrue, initBuf));
             il.Append(il.Create(OpCodes.Ldc_I4, 128));
             il.Append(il.Create(OpCodes.Newarr, module.ImportReference(vec3Type)));
             il.Append(il.Create(OpCodes.Stsfld, fCornerBuf));
@@ -1945,7 +1955,7 @@ namespace ValheimPatcher
             il.Append(il.Create(OpCodes.Stloc_1));
 
             var loopCheck = il.Create(OpCodes.Ldloc_1);
-            il.Append(il.Create(OpCodes.Br_S, loopCheck));
+            il.Append(il.Create(OpCodes.Br, loopCheck));
 
             var loopBody = il.Create(OpCodes.Ldarg_1);
             il.Append(loopBody);
@@ -1960,11 +1970,13 @@ namespace ValheimPatcher
 
             il.Append(loopCheck);
             il.Append(il.Create(OpCodes.Ldloc_0));
-            il.Append(il.Create(OpCodes.Blt_S, loopBody));
+            il.Append(il.Create(OpCodes.Blt, loopBody));
             il.Append(loopEnd);
 
+            helper.Body.OptimizeMacros();
             pfType.Methods.Add(helper);
 
+            getPath.Body.SimplifyMacros();
             for (int i = 0; i < getPath.Body.Instructions.Count; i++)
             {
                 var inst = getPath.Body.Instructions[i];
@@ -1985,6 +1997,7 @@ namespace ValheimPatcher
                     break;
                 }
             }
+            getPath.Body.OptimizeMacros();
         }
 
         // ==================== VERIFICATION ENGINE ====================
