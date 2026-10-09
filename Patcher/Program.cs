@@ -401,14 +401,10 @@ namespace ValheimPatcher
             }
             else
             {
-                Console.WriteLine($"\n[4/18] Patching WearNTear ({(targetVersion == PatchVersion.V8 ? "v8 smoothed" : "v7 robust")}, Max {updatesPerFrame} pieces/frame)...");
+                Console.WriteLine($"\n[4/18] Patching WearNTear ({(targetVersion == PatchVersion.V8 ? "v8" : "v7")} robust, Max {updatesPerFrame} pieces/frame)...");
                 var fSupportColliders = FindOrThrow(wntType.Fields, f => f.Name == "m_supportColliders", "m_supportColliders");
                 var getCountList = module.ImportReference(new MethodReference("get_Count", module.TypeSystem.Int32, fSupportColliders.FieldType) { HasThis = true });
                 ApplyWearNTearPatchesV7(wntType, updaterType, getFrameCount, getCountList, updatesPerFrame);
-                if (targetVersion == PatchVersion.V8)
-                {
-                    ApplyWearNTearUpdaterSmoothedV8(updaterType, wntType);
-                }
             }
 
             // Patch 4: ClutterSystem Vegetation Distance
@@ -435,15 +431,9 @@ namespace ValheimPatcher
             else
                 ApplyEffectListPatchesV7(effectListType, getTransformGO, getParent, setParentTwo, opImplicit);
 
-            // Patch 7: MessageHud Canvas Isolation (& DamageText/EnemyHud for v8)
+            // Patch 7: MessageHud Canvas Isolation
             var messageHudType = FindOrThrow(module.Types, t => t.Name == "MessageHud", "MessageHud");
             ApplyMessageHudCanvasIsolation(messageHudType, getGameObject, getCompCanvas, addCompCanvas);
-            if (targetVersion == PatchVersion.V8)
-            {
-                var damageTextType = FindOrThrow(module.Types, t => t.Name == "DamageText", "DamageText");
-                var enemyHudType = FindOrThrow(module.Types, t => t.Name == "EnemyHud", "EnemyHud");
-                ApplyCanvasIsolationV8(damageTextType, enemyHudType, getGameObject, getCompCanvas, addCompCanvas);
-            }
 
             // Patch 8: Forward Light Rendering Limits & Soft Particles
             Console.WriteLine("\n[8/18] Patching Forward Light rendering limits & disabling soft particles...");
@@ -1760,64 +1750,6 @@ namespace ValheimPatcher
 
         // ==================== V8 PATCH IMPLEMENTATIONS ====================
 
-        static void ApplyWearNTearUpdaterSmoothedV8(TypeDefinition updaterType, TypeDefinition wntType)
-        {
-            var updateCover = FindOrThrow(wntType.Methods, m => m.Name == "UpdateCover" && m.Parameters.Count == 1, "WearNTear.UpdateCover");
-            var updateAshlands = FindOrThrow(wntType.Methods, m => m.Name == "UpdateAshlandsMaterialValues" && m.Parameters.Count == 1, "WearNTear.UpdateAshlandsMaterialValues");
-            var startMethod = FindOrThrow(updaterType.Methods, m => m.Name == "Start", "WearNTearUpdater.Start");
-            var updateMethod = FindOrThrow(updaterType.Methods, m => m.Name == "UpdateWearNTear", "WearNTearUpdater.UpdateWearNTear");
-
-            // Start: call Shader.SetGlobalTexture once
-            var fAshTex = FindOrThrow(updaterType.Fields, f => f.Name == "m_ashlandsWearTexture", "m_ashlandsWearTexture");
-            var fAshProp = FindOrThrow(updaterType.Fields, f => f.Name == "s_ashlandsWearTexture", "s_ashlandsWearTexture");
-            var instSetTex = FindOrThrow(updateMethod.Body.Instructions, i => i.OpCode == OpCodes.Call && i.Operand?.ToString()?.Contains("SetGlobalTexture") == true, "SetGlobalTexture call");
-            var ilStart = startMethod.Body.GetILProcessor();
-            var lastStart = startMethod.Body.Instructions.Last();
-            ilStart.InsertBefore(lastStart, ilStart.Create(OpCodes.Ldsfld, fAshProp));
-            ilStart.InsertBefore(lastStart, ilStart.Create(OpCodes.Ldarg_0));
-            ilStart.InsertBefore(lastStart, ilStart.Create(OpCodes.Ldfld, fAshTex));
-            ilStart.InsertBefore(lastStart, ilStart.Create(OpCodes.Call, (MethodReference)instSetTex.Operand));
-            Console.WriteLine("  + WearNTearUpdater.Start: SetGlobalTexture bound at startup");
-
-            // UpdateWearNTear: bypass 1-second double foreach block
-            for (int i = 0; i < 10; i++)
-            {
-                if (updateMethod.Body.Instructions[i].OpCode == OpCodes.Brfalse)
-                {
-                    updateMethod.Body.Instructions[i].OpCode = OpCodes.Br;
-                    Console.WriteLine("  + WearNTearUpdater.UpdateWearNTear: 1.0s double-foreach spike bypassed");
-                    break;
-                }
-            }
-
-            // Sliced loop: insert UpdateCover & UpdateAshlandsMaterialValues after UpdateWear
-            for (int i = 0; i < updateMethod.Body.Instructions.Count; i++)
-            {
-                var inst = updateMethod.Body.Instructions[i];
-                if (inst.OpCode == OpCodes.Callvirt && inst.Operand?.ToString()?.Contains("UpdateWear") == true)
-                {
-                    var il = updateMethod.Body.GetILProcessor();
-                    var v5 = updateMethod.Body.Variables[5];
-                    var cur = inst;
-                    var i1 = il.Create(OpCodes.Ldloc_S, v5);
-                    var i2 = il.Create(OpCodes.Ldarg_1);
-                    var i3 = il.Create(OpCodes.Callvirt, updateCover);
-                    var i4 = il.Create(OpCodes.Ldloc_S, v5);
-                    var i5 = il.Create(OpCodes.Ldarg_2);
-                    var i6 = il.Create(OpCodes.Callvirt, updateAshlands);
-
-                    il.InsertAfter(cur, i6);
-                    il.InsertAfter(cur, i5);
-                    il.InsertAfter(cur, i4);
-                    il.InsertAfter(cur, i3);
-                    il.InsertAfter(cur, i2);
-                    il.InsertAfter(cur, i1);
-                    Console.WriteLine("  + WearNTearUpdater.UpdateWearNTear: UpdateCover & UpdateAshlandsMaterialValues smoothed across frames");
-                    break;
-                }
-            }
-        }
-
         static void ApplyHeightmapZeroAllocV8(TypeDefinition hmType)
         {
             var rcmMethod = FindOrThrow(hmType.Methods, m => m.Name == "RebuildCollisionMesh", "Heightmap.RebuildCollisionMesh");
@@ -1861,29 +1793,6 @@ namespace ValheimPatcher
                     break;
                 }
             }
-        }
-
-        static void ApplyCanvasIsolationV8(TypeDefinition damageTextType, TypeDefinition enemyHudType, MethodReference getGameObject, MethodReference getCompCanvas, MethodReference addCompCanvas)
-        {
-            ApplyCanvasToAwake(damageTextType, getGameObject, getCompCanvas, addCompCanvas);
-            ApplyCanvasToAwake(enemyHudType, getGameObject, getCompCanvas, addCompCanvas);
-            Console.WriteLine("  + DamageText & EnemyHud: Canvas isolation added (sub-canvas prevents main HUD dirtying)");
-        }
-
-        static void ApplyCanvasToAwake(TypeDefinition targetType, MethodReference getGameObject, MethodReference getCompCanvas, MethodReference addCompCanvas)
-        {
-            var awake = FindOrThrow(targetType.Methods, m => m.Name == "Awake", $"{targetType.Name}.Awake");
-            var il = awake.Body.GetILProcessor();
-            var first = awake.Body.Instructions[0];
-
-            il.InsertBefore(first, il.Create(OpCodes.Ldarg_0));
-            il.InsertBefore(first, il.Create(OpCodes.Call, getGameObject));
-            il.InsertBefore(first, il.Create(OpCodes.Callvirt, getCompCanvas));
-            il.InsertBefore(first, il.Create(OpCodes.Brtrue_S, first));
-            il.InsertBefore(first, il.Create(OpCodes.Ldarg_0));
-            il.InsertBefore(first, il.Create(OpCodes.Call, getGameObject));
-            il.InsertBefore(first, il.Create(OpCodes.Callvirt, addCompCanvas));
-            il.InsertBefore(first, il.Create(OpCodes.Pop));
         }
 
         static void ApplyInventoryGridCachingV8(TypeDefinition igType, TypeDefinition elemType, TypeDefinition itemDataType)
@@ -2111,7 +2020,7 @@ namespace ValheimPatcher
             Console.WriteLine($"Detected marker: {marker.Name} -> verifying against {verToVerify.ToString().ToLower()} ruleset...\n");
 
             int checksPassed = 0;
-            int totalChecks = verToVerify == PatchVersion.V8 ? 16 : (verToVerify == PatchVersion.V7 ? 10 : (verToVerify == PatchVersion.V6 ? 9 : 8));
+            int totalChecks = verToVerify == PatchVersion.V8 ? 14 : (verToVerify == PatchVersion.V7 ? 10 : (verToVerify == PatchVersion.V6 ? 9 : 8));
 
             void AssertCheck(bool condition, string name, string details)
             {
@@ -2150,13 +2059,6 @@ namespace ValheimPatcher
                 bool hsIsClean = !haveSupport.Body.Instructions.Any(i => i.OpCode == OpCodes.Ldc_R4 && (float)i.Operand == 100.0f);
                 AssertCheck(hsIsClean, "P0 WearNTear Structural Mechanics", "Preserved vanilla GetMinSupport check for stone/iron/marble");
 
-                // 5. WearNTearUpdater spike elimination: 1.0s double foreach bypassed, UpdateCover sliced
-                var updater = FindOrThrow(module.Types, t => t.Name == "WearNTearUpdater", "WearNTearUpdater");
-                var unwnt = FindOrThrow(updater.Methods, m => m.Name == "UpdateWearNTear", "WearNTearUpdater.UpdateWearNTear");
-                bool updaterBypassesSpike = unwnt.Body.Instructions.Take(10).Any(i => i.OpCode == OpCodes.Br);
-                bool updaterSlicesCover = unwnt.Body.Instructions.Any(i => i.OpCode == OpCodes.Callvirt && i.Operand?.ToString()?.Contains("UpdateCover") == true);
-                AssertCheck(updaterBypassesSpike && updaterSlicesCover, "P0 WearNTearUpdater Spike Elimination", "1.0s double-foreach bypassed, UpdateCover & material updates smoothly sliced");
-
                 // 6. Heightmap RebuildCollisionMesh zero-alloc List<int>
                 var hm = FindOrThrow(module.Types, t => t.Name == "Heightmap", "Heightmap");
                 var rcm = FindOrThrow(hm.Methods, m => m.Name == "RebuildCollisionMesh", "Heightmap.RebuildCollisionMesh");
@@ -2188,16 +2090,8 @@ namespace ValheimPatcher
                 bool clutterHandlesOff = applySettings.Body.Instructions.Any(i => i.OpCode == OpCodes.Ldc_R4 && (float)i.Operand == 0.0f);
                 AssertCheck(clutterHandlesOff, "P1 ClutterSystem Quality Logic", "Sets 0m vegetation distance when Quality is Off");
 
-                // 11. UI Canvas isolation for DamageText & EnemyHud
-                var dmgText = FindOrThrow(module.Types, t => t.Name == "DamageText", "DamageText");
+                // 10. EnemyHud hover text optimization
                 var enemyHud = FindOrThrow(module.Types, t => t.Name == "EnemyHud", "EnemyHud");
-                var dtAwake = FindOrThrow(dmgText.Methods, m => m.Name == "Awake", "DamageText.Awake");
-                var ehAwake = FindOrThrow(enemyHud.Methods, m => m.Name == "Awake", "EnemyHud.Awake");
-                bool canvasIso = dtAwake.Body.Instructions.Any(i => i.Operand?.ToString()?.Contains("Canvas") == true)
-                              && ehAwake.Body.Instructions.Any(i => i.Operand?.ToString()?.Contains("Canvas") == true);
-                AssertCheck(canvasIso, "P1 UI Canvas Isolation", "DamageText and EnemyHud isolated into sub-canvases to protect main 3K HUD");
-
-                // 12. EnemyHud hover text optimization
                 var updateHuds = FindOrThrow(enemyHud.Methods, m => m.Name == "UpdateHuds", "EnemyHud.UpdateHuds");
                 bool ehNoPerFrameLocalize = !updateHuds.Body.Instructions.Any(i => i.OpCode == OpCodes.Callvirt && i.Operand?.ToString()?.Contains("GetHoverName") == true);
                 AssertCheck(ehNoPerFrameLocalize, "P1 EnemyHud Hover Optimization", "Eliminated redundant per-frame Localization.Localize & set_text in UpdateHuds");
