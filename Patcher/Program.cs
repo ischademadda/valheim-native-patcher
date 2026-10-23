@@ -1,6 +1,8 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
+using System.Runtime.InteropServices;
 using System.Linq;
 using System.Security.Cryptography;
 using Mono.Cecil;
@@ -14,7 +16,8 @@ namespace ValheimPatcher
         V5,
         V6,
         V7,
-        V8
+        V8,
+        V9
     }
 
     class Program
@@ -23,6 +26,7 @@ namespace ValheimPatcher
         public const string MarkerFieldNameV6 = "s_nativePatched_v6";
         public const string MarkerFieldNameV7 = "s_nativePatched_v7";
         public const string MarkerFieldNameV8 = "s_nativePatched_v8";
+        public const string MarkerFieldNameV9 = "s_nativePatched_v9";
 
         /// <summary>Safe lookup with descriptive error on game version mismatch.</summary>
         static T FindOrThrow<T>(IEnumerable<T> source, Func<T, bool> predicate, string context)
@@ -42,12 +46,76 @@ namespace ValheimPatcher
             return Convert.ToHexString(hash).ToLowerInvariant();
         }
 
+        /// <summary>Exit code of "ensure" when the patch was missing and has just been applied (caller must re-sign on macOS).</summary>
+        const int ExitPatchedNow = 3;
+
         static int Main(string[] args)
         {
-            PatchVersion targetVersion = PatchVersion.V8;
+            // Steam launch-option wrapper: "ValheimPatcher.exe ensure v9 -- %command%".
+            // Everything after "--" is the game command; it is started even if patching fails.
+            int sep = Array.IndexOf(args, "--");
+            if (sep < 0) return Run(args);
+
+            string[] gameCommand = args[(sep + 1)..];
+            int result;
+            try { result = Run(args[..sep]); }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[ERROR] {ex.Message}");
+                result = 1;
+            }
+            AppendLaunchLog(string.Join(" ", args[..sep]), result);
+            return gameCommand.Length == 0 ? result : LaunchGame(gameCommand);
+        }
+
+        static void AppendLaunchLog(string patcherArgs, int result)
+        {
+            string outcome = result switch { 0 => "already patched", ExitPatchedNow => "patched now", _ => $"FAILED (exit {result}), game started unpatched" };
+            try { File.AppendAllText(Path.Combine(AppContext.BaseDirectory, "autopatch.log"), $"{DateTime.Now:yyyy-MM-dd HH:mm:ss} {patcherArgs}: {outcome}{Environment.NewLine}"); }
+            catch { /* logging must never block the game launch */ }
+        }
+
+        [DllImport("kernel32.dll")]
+        static extern bool FreeConsole();
+
+        static int LaunchGame(string[] command)
+        {
+            string exe = Path.GetFullPath(command[0]);
+            var psi = new ProcessStartInfo(exe) { UseShellExecute = false, WorkingDirectory = Path.GetDirectoryName(exe) ?? "" };
+            foreach (var a in command.Skip(1)) psi.ArgumentList.Add(a);
+            using var proc = Process.Start(psi)!;
+            // Close our console window but stay alive, so Steam keeps tracking the session (playtime, overlay).
+            if (OperatingSystem.IsWindows()) FreeConsole();
+            proc.WaitForExit();
+            return proc.ExitCode;
+        }
+
+        static string MarkerFor(PatchVersion v) => v switch
+        {
+            PatchVersion.V9 => MarkerFieldNameV9,
+            PatchVersion.V8 => MarkerFieldNameV8,
+            PatchVersion.V7 => MarkerFieldNameV7,
+            PatchVersion.V6 => MarkerFieldNameV6,
+            _ => MarkerFieldNameV5
+        };
+
+        static string? ReadMarker(string dllPath, string managedDir)
+        {
+            using var resolver = new DefaultAssemblyResolver();
+            resolver.AddSearchDirectory(managedDir);
+            using var asm = AssemblyDefinition.ReadAssembly(dllPath, new ReaderParameters { AssemblyResolver = resolver });
+            var wnt = asm.MainModule.Types.FirstOrDefault(t => t.Name == "WearNTear");
+            return wnt?.Fields.FirstOrDefault(f => f.Name.StartsWith("s_nativePatched_"))?.Name;
+        }
+
+        static int Run(string[] args)
+        {
+            PatchVersion targetVersion = PatchVersion.V9;
             bool restoreMode = false;
             bool statusMode = false;
             bool verifyMode = false;
+            bool ensureMode = false;
+            bool profile = false;
             PatchVersion? verifyVersion = null;
 
             int physicsSteps = 4;
@@ -85,6 +153,11 @@ namespace ValheimPatcher
                     targetVersion = PatchVersion.V8;
                     verifyVersion = PatchVersion.V8;
                 }
+                else if (string.Equals(arg, "v9", StringComparison.OrdinalIgnoreCase))
+                {
+                    targetVersion = PatchVersion.V9;
+                    verifyVersion = PatchVersion.V9;
+                }
                 else if ((arg == "--version" || arg == "-v") && i + 1 < args.Length)
                 {
                     string vStr = args[++i].Trim().ToLowerInvariant();
@@ -92,13 +165,22 @@ namespace ValheimPatcher
                     else if (vStr == "6" || vStr == "v6") { targetVersion = PatchVersion.V6; verifyVersion = PatchVersion.V6; }
                     else if (vStr == "7" || vStr == "v7") { targetVersion = PatchVersion.V7; verifyVersion = PatchVersion.V7; }
                     else if (vStr == "8" || vStr == "v8") { targetVersion = PatchVersion.V8; verifyVersion = PatchVersion.V8; }
+                    else if (vStr == "9" || vStr == "v9") { targetVersion = PatchVersion.V9; verifyVersion = PatchVersion.V9; }
                     else
                     {
                         Console.ForegroundColor = ConsoleColor.Red;
-                        Console.WriteLine($"[ERROR] Unknown version '{vStr}'. Supported versions: v5, v6, v7, v8");
+                        Console.WriteLine($"[ERROR] Unknown version '{vStr}'. Supported versions: v5, v6, v7, v8, v9");
                         Console.ResetColor();
                         return 1;
                     }
+                }
+                else if (arg == "--profile" || string.Equals(arg, "profile", StringComparison.OrdinalIgnoreCase))
+                {
+                    profile = true;
+                }
+                else if (arg == "--ensure" || string.Equals(arg, "ensure", StringComparison.OrdinalIgnoreCase))
+                {
+                    ensureMode = true;
                 }
                 else if (arg == "--restore" || string.Equals(arg, "restore", StringComparison.OrdinalIgnoreCase))
                 {
@@ -118,6 +200,7 @@ namespace ValheimPatcher
                         else if (next == "v6" || next == "6") { verifyVersion = PatchVersion.V6; i++; }
                         else if (next == "v7" || next == "7") { verifyVersion = PatchVersion.V7; i++; }
                         else if (next == "v8" || next == "8") { verifyVersion = PatchVersion.V8; i++; }
+                        else if (next == "v9" || next == "9") { verifyVersion = PatchVersion.V9; i++; }
                     }
                 }
                 else if (arg == "--managed" && i + 1 < args.Length)
@@ -149,14 +232,23 @@ namespace ValheimPatcher
 
             string verTag = targetVersion switch
             {
-                PatchVersion.V8 => "v8 (Zero-Stutter Anti-Pattern Elimination - Recommended)",
+                PatchVersion.V9 => "v9 (v7 + Vanilla-Correct Support, Fire & Terrain Cooking - Recommended)",
+                PatchVersion.V8 => "v8 (Zero-Stutter Anti-Pattern Elimination)",
                 PatchVersion.V7 => "v7 (Engine & Gameplay Fixes Edition)",
                 PatchVersion.V6 => "v6 (Robust Network & Gameplay Edition)",
                 _ => "v5 (Legacy Optimization Edition)"
             };
             Console.WriteLine("=========================================================");
-            Console.WriteLine("     Valheim Native IL Patcher (macOS Apple Silicon)     ");
-            Console.WriteLine("     Zero Rosetta, Zero BepInEx, Native arm64 Mono       ");
+            if (OperatingSystem.IsWindows())
+            {
+                Console.WriteLine("     Valheim Native IL Patcher (Windows x64)             ");
+                Console.WriteLine("     Zero BepInEx, direct IL patching                    ");
+            }
+            else
+            {
+                Console.WriteLine("     Valheim Native IL Patcher (macOS Apple Silicon)     ");
+                Console.WriteLine("     Zero Rosetta, Zero BepInEx, Native arm64 Mono       ");
+            }
             Console.WriteLine($"     Selected Version: {verTag}");
             Console.WriteLine("=========================================================\n");
 
@@ -169,15 +261,25 @@ namespace ValheimPatcher
                     if (Directory.Exists(candidate)) { managedDir = candidate; break; }
                     string candidateApp = Path.Combine(current, "valheim.app/Contents/Resources/Data/Managed");
                     if (Directory.Exists(candidateApp)) { managedDir = candidateApp; break; }
+                    // Windows layout: <Valheim>/valheim_Data/Managed
+                    string candidateWin = Path.Combine(current, "valheim_Data", "Managed");
+                    if (Directory.Exists(candidateWin)) { managedDir = candidateWin; break; }
                     var parent = Directory.GetParent(current);
                     current = parent?.FullName;
                 }
             }
 
+            if (string.IsNullOrEmpty(managedDir) && OperatingSystem.IsWindows())
+            {
+                // Patcher not placed inside the game folder: try the default Steam library
+                string defaultSteam = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86), "Steam", "steamapps", "common", "Valheim", "valheim_Data", "Managed");
+                if (Directory.Exists(defaultSteam)) managedDir = defaultSteam;
+            }
+
             if (string.IsNullOrEmpty(managedDir))
             {
                 Console.ForegroundColor = ConsoleColor.Red;
-                Console.WriteLine("[ERROR] Could not auto-detect Managed directory. Use --managed <path> to specify it.");
+                Console.WriteLine("[ERROR] Could not auto-detect Managed directory. Put the patcher inside the Valheim folder or use --managed <path>.");
                 Console.ResetColor();
                 return 1;
             }
@@ -197,22 +299,39 @@ namespace ValheimPatcher
             if (restoreMode) return RestoreBackup(dllPath, bakPath);
             if (verifyMode) return VerifyPatches(dllPath, managedDir, verifyVersion);
 
-            return ApplyPatches(dllPath, bakPath, managedDir, physicsSteps, spawnLimit, updatesPerFrame, vegetationDistance, targetVersion);
+            if (ensureMode)
+            {
+                string? found = ReadMarker(dllPath, managedDir);
+                if (found == MarkerFor(targetVersion))
+                {
+                    Console.WriteLine($"[ENSURE] Already patched ({found}), nothing to do.");
+                    return 0;
+                }
+                Console.WriteLine($"[ENSURE] Patch missing (found: {found ?? "vanilla"}), applying {targetVersion.ToString().ToLowerInvariant()}...");
+                int applied = ApplyPatches(dllPath, bakPath, managedDir, physicsSteps, spawnLimit, updatesPerFrame, vegetationDistance, targetVersion, profile);
+                return applied == 0 ? ExitPatchedNow : applied;
+            }
+
+            return ApplyPatches(dllPath, bakPath, managedDir, physicsSteps, spawnLimit, updatesPerFrame, vegetationDistance, targetVersion, profile);
         }
 
         static void PrintHelp()
         {
             Console.WriteLine("Usage: dotnet run --project Patcher [version] [options]");
-            Console.WriteLine("       ./patch.sh [v5|v6|v7|v8|--status|--verify|--restore]");
-            Console.WriteLine("       ./start patch [v5|v6|v7|v8|status|verify|restore]");
+            Console.WriteLine("       ./patch.sh [v5|v6|v7|v8|v9|--status|--verify|--restore]");
+            Console.WriteLine("       ./start patch [v5|v6|v7|v8|v9|status|verify|restore]");
             Console.WriteLine("\nVersions:");
-            Console.WriteLine("  v8                         Apply v8 patch set (Recommended, zero-stutter anti-pattern fixes)");
+            Console.WriteLine("  v9                         Apply v9 patch set (Recommended, v7 + vanilla-correct support/fire, fast terrain cooking)");
+            Console.WriteLine("  v8                         Apply v8 patch set (Zero-stutter anti-pattern fixes)");
             Console.WriteLine("  v7                         Apply v7 patch set (Engine bugfixes & combat stability)");
             Console.WriteLine("  v6                         Apply v6 patch set (Legacy network & stability fixes)");
             Console.WriteLine("  v5                         Apply v5 patch set (Legacy optimization set)");
             Console.WriteLine("\nOptions:");
             Console.WriteLine("  --status, status           Check current patch status and backup existence");
-            Console.WriteLine("  --verify [v5|v6|v7|v8], verify Deep verify patch invariants in target assembly");
+            Console.WriteLine("  --profile, profile          Also inject the section profiler (writes native_profile.log next to Player.log)");
+            Console.WriteLine("  --ensure, ensure [vN]      Patch only if the requested version is not already applied (exit 0 = ok, 3 = patched now)");
+            Console.WriteLine("  ... -- <game command>      Steam launch option wrapper, e.g.: ValheimPatcher.exe ensure v9 -- %command%");
+            Console.WriteLine("  --verify [v5|v6|v7|v8|v9], verify Deep verify patch invariants in target assembly");
             Console.WriteLine("  --restore, restore         Restore original assembly_valheim.dll from backup");
             Console.WriteLine("  --physics-steps <N>        Max FixedUpdate physics steps per frame (default: 4)");
             Console.WriteLine("  --spawn-limit <N>          Max ZNetScene objects spawned per frame in gameplay (default: 25)");
@@ -238,7 +357,9 @@ namespace ValheimPatcher
             if (marker != null)
             {
                 Console.ForegroundColor = ConsoleColor.Green;
-                if (marker.Name == MarkerFieldNameV8)
+                if (marker.Name == MarkerFieldNameV9)
+                    Console.WriteLine($"Status: ALREADY PATCHED (marker: {marker.Name} [v9 - Vanilla-Correct Engine Fixes])");
+                else if (marker.Name == MarkerFieldNameV8)
                     Console.WriteLine($"Status: ALREADY PATCHED (marker: {marker.Name} [v8 - Zero Stutter & Stability])");
                 else if (marker.Name == MarkerFieldNameV7)
                     Console.WriteLine($"Status: ALREADY PATCHED (marker: {marker.Name} [v7 - Engine & Gameplay Fixes])");
@@ -248,6 +369,8 @@ namespace ValheimPatcher
                     Console.WriteLine($"Status: ALREADY PATCHED (marker: {marker.Name} [v5 - Legacy])");
                 else
                     Console.WriteLine($"Status: ALREADY PATCHED (marker: {marker.Name})");
+                if (wnt!.Fields.Any(f => f.Name == ProfilerMarkerField))
+                    Console.WriteLine($"Profiler: INJECTED (writes native_profile.log; re-apply without 'profile' to remove)");
             }
             else
             {
@@ -267,13 +390,15 @@ namespace ValheimPatcher
                 return 1;
             }
             File.Copy(bakPath, dllPath, true);
+            string profilerDll = Path.Combine(Path.GetDirectoryName(dllPath)!, ProfilerAssemblyFile);
+            if (File.Exists(profilerDll)) File.Delete(profilerDll);
             Console.ForegroundColor = ConsoleColor.Green;
             Console.WriteLine("[SUCCESS] Vanilla assembly successfully restored!");
             Console.ResetColor();
             return 0;
         }
 
-        static int ApplyPatches(string dllPath, string bakPath, string managedDir, int physicsSteps, int spawnLimit, int updatesPerFrame, float vegetationDistance, PatchVersion targetVersion)
+        static int ApplyPatches(string dllPath, string bakPath, string managedDir, int physicsSteps, int spawnLimit, int updatesPerFrame, float vegetationDistance, PatchVersion targetVersion, bool profile)
         {
             if (!File.Exists(bakPath))
             {
@@ -390,6 +515,7 @@ namespace ValheimPatcher
             // Patch 3: WearNTear Throttling & Support Caching
             var wntType = FindOrThrow(module.Types, t => t.Name == "WearNTear", "WearNTear");
             var updaterType = FindOrThrow(module.Types, t => t.Name == "WearNTearUpdater", "WearNTearUpdater");
+            string verLabel = targetVersion.ToString().ToLowerInvariant();
             if (targetVersion == PatchVersion.V5)
             {
                 Console.WriteLine($"\n[4/18] Patching WearNTear (v5 legacy fast-path, Max {updatesPerFrame} pieces/frame)...");
@@ -400,9 +526,17 @@ namespace ValheimPatcher
                 Console.WriteLine($"\n[4/18] Patching WearNTear (v6 owner-guarded fast-path, Max {updatesPerFrame} pieces/frame)...");
                 ApplyWearNTearPatchesV6(wntType, updaterType, getFrameCount, isOwnerMethod, updatesPerFrame);
             }
+            else if (targetVersion == PatchVersion.V9)
+            {
+                // v9: vanilla support logic (it already caches support colliders) + per-frame updater cap only.
+                // The v7 1/8 frame stagger aliases with the updater's round-robin and can stall collapse indefinitely.
+                Console.WriteLine($"\n[4/18] Patching WearNTear (v9 vanilla support logic, Max {updatesPerFrame} pieces/frame)...");
+                ApplyWearNTearUpdaterCap(updaterType, updatesPerFrame);
+                Console.WriteLine("  + WearNTear: Preserved vanilla UpdateSupport cache & HaveSupport (no frame stagger)");
+            }
             else
             {
-                Console.WriteLine($"\n[4/18] Patching WearNTear ({(targetVersion == PatchVersion.V8 ? "v8" : "v7")} robust, Max {updatesPerFrame} pieces/frame)...");
+                Console.WriteLine($"\n[4/18] Patching WearNTear ({verLabel} robust, Max {updatesPerFrame} pieces/frame)...");
                 var fSupportColliders = FindOrThrow(wntType.Fields, f => f.Name == "m_supportColliders", "m_supportColliders");
                 var getCountList = module.ImportReference(new MethodReference("get_Count", module.TypeSystem.Int32, fSupportColliders.FieldType) { HasThis = true });
                 ApplyWearNTearPatchesV7(wntType, updaterType, getFrameCount, getCountList, updatesPerFrame);
@@ -416,7 +550,10 @@ namespace ValheimPatcher
             // Patch 5: Heightmap PhysX Cooking & Zero-Alloc Collision Mesh
             Console.WriteLine("\n[6/18] Patching Heightmap PhysX FastMidphase cooking options & zero-alloc mesh...");
             var heightmapType = FindOrThrow(module.Types, t => t.Name == "Heightmap", "Heightmap");
-            ApplyHeightmapPatches(heightmapType, setCookingOptions);
+            // 30 = Unity default (FasterSimulation|MeshCleaning|WeldVertices|FastMidphase), i.e. a no-op.
+            // v9: 16 = FastMidphase only. The heightmap grid has no degenerate tris or duplicate verts,
+            // so cleaning/welding is wasted main-thread cook time on every terrain edit and chunk load.
+            ApplyHeightmapPatches(heightmapType, setCookingOptions, targetVersion == PatchVersion.V9 ? 16 : 30);
             if (targetVersion == PatchVersion.V8)
             {
                 ApplyHeightmapZeroAllocV8(heightmapType);
@@ -442,8 +579,10 @@ namespace ValheimPatcher
             var lightLodType = FindOrThrow(module.Types, t => t.Name == "LightLod", "LightLod");
             if (targetVersion == PatchVersion.V5)
                 ApplyForwardRenderingPatchesV5(gsmType, lightLodType);
+            else if (targetVersion == PatchVersion.V9)
+                ApplyForwardRenderingPatchesV6(gsmType, lightLodType, 4, 10, 16);
             else
-                ApplyForwardRenderingPatchesV6(gsmType, lightLodType);
+                ApplyForwardRenderingPatchesV6(gsmType, lightLodType, 4, 6, 8);
 
             // Patch 9: LightFlicker Transform Hierarchy
             Console.WriteLine("\n[9/18] Patching LightFlicker to eliminate transform hierarchy invalidation...");
@@ -456,9 +595,17 @@ namespace ValheimPatcher
             ApplySmokeSpawnerPatches(smokeSpawnerType);
 
             // Patch 11: Fire.Dot PhysX Throttle
-            Console.WriteLine("\n[11/18] Patching Fire.Dot PhysX OverlapSphere query interval...");
             var fireType = FindOrThrow(module.Types, t => t.Name == "Fire", "Fire");
-            ApplyFireDotInterval(fireType);
+            if (targetVersion == PatchVersion.V9)
+            {
+                // Fire.Dot deals damage per tick, so a longer interval is a balance change, not an optimization.
+                Console.WriteLine("\n[11/18] Fire.Dot: preserved vanilla 1.0s interval (damage & fuel burn per tick unchanged)");
+            }
+            else
+            {
+                Console.WriteLine("\n[11/18] Patching Fire.Dot PhysX OverlapSphere query interval...");
+                ApplyFireDotInterval(fireType);
+            }
 
             // ==================== VERSION-SPECIFIC PATCHES (12-18) ====================
 
@@ -475,7 +622,7 @@ namespace ValheimPatcher
             }
             else
             {
-                Console.WriteLine($"\n[12/18] Patching Fire ({(targetVersion == PatchVersion.V8 ? "v8" : "v7")} clean: preserved vanilla UpdateFire integrity, dotInterval=2.0s active)...");
+                Console.WriteLine($"\n[12/18] Patching Fire ({verLabel} clean: preserved vanilla UpdateFire integrity, dotInterval={(targetVersion == PatchVersion.V9 ? "1.0s vanilla" : "2.0s active")})...");
             }
 
             // Patch 13: Ragdoll
@@ -492,7 +639,7 @@ namespace ValheimPatcher
             }
             else
             {
-                Console.WriteLine($"\n[13/18] Patching Ragdoll ({(targetVersion == PatchVersion.V8 ? "v8" : "v7")} TTL 3.5s clean PhysX release)...");
+                Console.WriteLine($"\n[13/18] Patching Ragdoll ({verLabel} TTL 3.5s clean PhysX release)...");
                 ApplyRagdollPatchesV7(ragdollType, mathfMinFloat);
             }
 
@@ -509,7 +656,7 @@ namespace ValheimPatcher
             }
             else
             {
-                Console.WriteLine($"\n[14/18] Patching EffectList global frame limiter ({(targetVersion == PatchVersion.V8 ? "v8" : "v7")} 45m combat range, <=16 free, <=32 cap)...");
+                Console.WriteLine($"\n[14/18] Patching EffectList global frame limiter ({verLabel} 45m combat range, <=16 free, <=32 cap)...");
                 ApplyEffectListFrameLimiterV7(effectListType, gameType, playerType, getTransformComp, getPosition, vec3Distance, arrayEmptyGameObject, opImplicit);
             }
 
@@ -528,7 +675,7 @@ namespace ValheimPatcher
             }
             else
             {
-                Console.WriteLine($"\n[15/18] Patching Character Animator LOD ({(targetVersion == PatchVersion.V8 ? "v8" : "v7")} CullUpdateTransforms only for ambient wildlife, full combat safety)...");
+                Console.WriteLine($"\n[15/18] Patching Character Animator LOD ({verLabel} CullUpdateTransforms only for ambient wildlife, full combat safety)...");
                 ApplyCharacterAnimatorLODV7(charType, humanoidType, setCullingMode);
             }
 
@@ -540,14 +687,21 @@ namespace ValheimPatcher
                 ApplyEnemyHudCachingV8(enemyHudType);
             }
 
-            // Add marker field
-            string activeMarker = targetVersion switch
+            // Optional profiling build (must run last so it measures the patched code)
+            string profilerDllPath = Path.Combine(managedDir, ProfilerAssemblyFile);
+            if (profile)
             {
-                PatchVersion.V8 => MarkerFieldNameV8,
-                PatchVersion.V7 => MarkerFieldNameV7,
-                PatchVersion.V6 => MarkerFieldNameV6,
-                _ => MarkerFieldNameV5
-            };
+                Console.WriteLine("\n[PROFILE] Injecting native section profiler (log: native_profile.log next to Player.log)...");
+                ApplyProfiler(module, profilerDllPath);
+            }
+            else if (File.Exists(profilerDllPath))
+            {
+                File.Delete(profilerDllPath);
+                Console.WriteLine($"Removed stale profiler helper: {profilerDllPath}");
+            }
+
+            // Add marker field
+            string activeMarker = MarkerFor(targetVersion);
             var wntType2 = FindOrThrow(module.Types, t => t.Name == "WearNTear", "WearNTear");
             wntType2.Fields.Add(new FieldDefinition(activeMarker, FieldAttributes.Private | FieldAttributes.Static, module.TypeSystem.Boolean));
 
@@ -692,7 +846,7 @@ namespace ValheimPatcher
             }
         }
 
-        static void ApplyHeightmapPatches(TypeDefinition heightmapType, MethodReference setCookingOptions)
+        static void ApplyHeightmapPatches(TypeDefinition heightmapType, MethodReference setCookingOptions, int cookingOptions)
         {
             var awake = FindOrThrow(heightmapType.Methods, m => m.Name == "Awake", "Heightmap.Awake");
             var fCollider = FindOrThrow(heightmapType.Fields, f => f.Name == "m_collider", "Heightmap.m_collider");
@@ -708,10 +862,10 @@ namespace ValheimPatcher
                     il.InsertBefore(next, il.Create(OpCodes.Brfalse_S, skip));
                     il.InsertBefore(next, il.Create(OpCodes.Ldarg_0));
                     il.InsertBefore(next, il.Create(OpCodes.Ldfld, fCollider));
-                    il.InsertBefore(next, il.Create(OpCodes.Ldc_I4_S, (sbyte)30));
+                    il.InsertBefore(next, il.Create(OpCodes.Ldc_I4_S, (sbyte)cookingOptions));
                     il.InsertBefore(next, il.Create(OpCodes.Callvirt, setCookingOptions));
                     il.InsertBefore(next, skip);
-                    Console.WriteLine("  + Heightmap.Awake: FastMidphase cooking (30)");
+                    Console.WriteLine($"  + Heightmap.Awake: FastMidphase cooking ({cookingOptions})");
                     break;
                 }
             }
@@ -1106,8 +1260,16 @@ namespace ValheimPatcher
 
         // ==================== V6 REFINED PATCH IMPLEMENTATIONS ====================
 
-        static void ApplyForwardRenderingPatchesV6(TypeDefinition gsmType, TypeDefinition lightLodType)
+        static void ApplyForwardRenderingPatchesV6(TypeDefinition gsmType, TypeDefinition lightLodType, int pointLow, int pointMed, int pointHigh)
         {
+            Instruction LdcI4(int val) => val switch
+            {
+                4 => Instruction.Create(OpCodes.Ldc_I4_4),
+                6 => Instruction.Create(OpCodes.Ldc_I4_6),
+                8 => Instruction.Create(OpCodes.Ldc_I4_8),
+                _ => Instruction.Create(OpCodes.Ldc_I4_S, (sbyte)val)
+            };
+
             var getLightLimit = FindOrThrow(gsmType.Methods, m => m.Name == "GetLightLimit", "GetLightLimit");
             getLightLimit.Body.Instructions.Clear();
             var il = getLightLimit.Body.GetILProcessor();
@@ -1126,30 +1288,36 @@ namespace ValheimPatcher
             var argOpP = getPointLightLimit.IsStatic ? OpCodes.Ldarg_0 : OpCodes.Ldarg_1;
             nz = il.Create(OpCodes.Nop);
             il.Emit(argOpP); il.Emit(OpCodes.Brtrue_S, nz);
-            il.Emit(OpCodes.Ldc_I4_4); il.Emit(OpCodes.Ret); il.Append(nz);
+            il.Append(LdcI4(pointLow)); il.Emit(OpCodes.Ret); il.Append(nz);
             n1 = il.Create(OpCodes.Nop);
             il.Emit(argOpP); il.Emit(OpCodes.Ldc_I4_1); il.Emit(OpCodes.Bne_Un_S, n1);
-            il.Emit(OpCodes.Ldc_I4_6); il.Emit(OpCodes.Ret); il.Append(n1);
-            il.Emit(OpCodes.Ldc_I4_8); il.Emit(OpCodes.Ret);
+            il.Append(LdcI4(pointMed)); il.Emit(OpCodes.Ret); il.Append(n1);
+            il.Append(LdcI4(pointHigh)); il.Emit(OpCodes.Ret);
 
             var applyQuality = FindOrThrow(gsmType.Methods, m => m.Name == "ApplyQualitySettings", "ApplyQualitySettings");
             for (int i = 0; i < applyQuality.Body.Instructions.Count; i++)
             {
                 var inst = applyQuality.Body.Instructions[i];
                 if (inst.Operand is MethodReference mr && mr.Name == "set_softParticles")
-                { applyQuality.Body.Instructions[i - 2].OpCode = OpCodes.Nop; applyQuality.Body.Instructions[i - 1].OpCode = OpCodes.Ldc_I4_0; applyQuality.Body.Instructions[i - 1].Operand = null; break; }
+                {
+                    if (applyQuality.Body.Instructions[i - 2].OpCode != OpCodes.Ldarg_0 || applyQuality.Body.Instructions[i - 1].OpCode != OpCodes.Ldfld)
+                        throw new InvalidOperationException("[PATCH ERROR] ApplyQualitySettings: unexpected IL before set_softParticles (expected ldarg.0; ldfld)");
+                    applyQuality.Body.Instructions[i - 2].OpCode = OpCodes.Nop; applyQuality.Body.Instructions[i - 1].OpCode = OpCodes.Ldc_I4_0; applyQuality.Body.Instructions[i - 1].Operand = null; break;
+                }
             }
 
             var llCtor = FindOrThrow(lightLodType.Methods, m => m.IsConstructor && !m.IsStatic, "LightLod..ctor");
             for (int i = 0; i < llCtor.Body.Instructions.Count; i++)
             {
-                if (llCtor.Body.Instructions[i].Operand is FieldReference fr)
+                if (llCtor.Body.Instructions[i].Operand is FieldReference fr && (fr.Name == "m_lightDistance" || fr.Name == "m_shadowDistance"))
                 {
+                    if (llCtor.Body.Instructions[i - 1].OpCode != OpCodes.Ldc_R4)
+                        throw new InvalidOperationException($"[PATCH ERROR] LightLod..ctor: expected ldc.r4 before {fr.Name}");
                     if (fr.Name == "m_lightDistance") llCtor.Body.Instructions[i - 1].Operand = 28.0f;
-                    else if (fr.Name == "m_shadowDistance") llCtor.Body.Instructions[i - 1].Operand = 14.0f;
+                    else llCtor.Body.Instructions[i - 1].Operand = 14.0f;
                 }
             }
-            Console.WriteLine("  + Forward lights: 2/3/4, point: 4/6/8, softParticles=false, LightLod 28m/14m (v6 adaptive)");
+            Console.WriteLine($"  + Forward lights: 2/3/4, point: {pointLow}/{pointMed}/{pointHigh}, softParticles=false, LightLod 28m/14m (v6 adaptive)");
         }
 
         static void ApplyWearNTearPatchesV6(TypeDefinition wntType, TypeDefinition updaterType, MethodReference getFrameCount, MethodReference isOwnerMethod, int maxUpdatesPerFrame)
@@ -1263,7 +1431,7 @@ namespace ValheimPatcher
             }
         }
 
-        static void ApplyWearNTearPatchesV7(TypeDefinition wntType, TypeDefinition updaterType, MethodReference getFrameCount, MethodReference getCountList, int maxUpdatesPerFrame)
+        static void ApplyWearNTearUpdaterCap(TypeDefinition updaterType, int maxUpdatesPerFrame)
         {
             void SetLdcI4(Instruction inst, int val)
             {
@@ -1288,6 +1456,11 @@ namespace ValheimPatcher
             foreach (var inst in updateWearNTear.Body.Instructions)
                 if (inst.OpCode == OpCodes.Ldc_I4_S && (sbyte)inst.Operand == 100)
                 { SetLdcI4(inst, maxUpdatesPerFrame); Console.WriteLine($"  + WearNTearUpdater.UpdateWearNTear: upper clamp 100 -> {maxUpdatesPerFrame}"); break; }
+        }
+
+        static void ApplyWearNTearPatchesV7(TypeDefinition wntType, TypeDefinition updaterType, MethodReference getFrameCount, MethodReference getCountList, int maxUpdatesPerFrame)
+        {
+            ApplyWearNTearUpdaterCap(updaterType, maxUpdatesPerFrame);
 
             // Note: WearNTear.GetSupport is NOT patched in v7 (vanilla already returns m_support when IsOwner).
             // Note: WearNTear.HaveSupport is NOT patched in v7 (vanilla m_support >= GetMinSupport() is clean and preserves heavy materials).
@@ -1400,6 +1573,11 @@ namespace ValheimPatcher
             var skipTarget = instrs[endIdx + 1];
             var il = m.Body.GetILProcessor();
             var instanceVar = m.Body.Variables[6];
+            // Hardcoded locals: V_3 = parent Transform, V_6 = spawned GameObject. Fail loudly if a game update reshuffles them.
+            if (m.Body.Variables[3].VariableType.FullName != "UnityEngine.Transform" ||
+                instanceVar.VariableType.FullName != "UnityEngine.GameObject" ||
+                instrs[startIdx].Operand != instanceVar)
+                throw new InvalidOperationException("[PATCH ERROR] EffectList.Create: local variable layout changed (expected V_3 Transform, V_6 GameObject)");
             var ni = new[] {
                 il.Create(OpCodes.Ldloc_3),
                 il.Create(OpCodes.Call, opImplicit),
@@ -1437,6 +1615,11 @@ namespace ValheimPatcher
             var skipTarget = instrs[endIdx + 1];
             var il = m.Body.GetILProcessor();
             var instanceVar = m.Body.Variables[6];
+            // Hardcoded locals: V_3 = parent Transform, V_6 = spawned GameObject. Fail loudly if a game update reshuffles them.
+            if (m.Body.Variables[3].VariableType.FullName != "UnityEngine.Transform" ||
+                instanceVar.VariableType.FullName != "UnityEngine.GameObject" ||
+                instrs[startIdx].Operand != instanceVar)
+                throw new InvalidOperationException("[PATCH ERROR] EffectList.Create: local variable layout changed (expected V_3 Transform, V_6 GameObject)");
             var ni = new[] {
                 il.Create(OpCodes.Ldloc_3),
                 il.Create(OpCodes.Call, opImplicit),
@@ -1735,6 +1918,159 @@ namespace ValheimPatcher
             }
         }
 
+        // ==================== PROFILER INJECTION ====================
+
+        const string ProfilerAssemblyFile = "NativePatchProfiler.dll";
+        const string ProfilerMarkerField = "s_nativeProfiler";
+
+        /// <summary>
+        /// Wraps every MonoBehaviour Update/LateUpdate/FixedUpdate, the MonoUpdaters batches and a few known
+        /// heavy methods with Prof.Begin/End. The helper assembly is embedded in the patcher and dropped next to
+        /// assembly_valheim.dll, where the game's Mono runtime resolves it.
+        /// </summary>
+        static void ApplyProfiler(ModuleDefinition module, string profilerDllPath)
+        {
+            using var res = typeof(Program).Assembly.GetManifestResourceStream(ProfilerAssemblyFile)
+                ?? throw new InvalidOperationException($"[PATCH ERROR] Embedded {ProfilerAssemblyFile} missing from patcher build");
+            using var ms = new MemoryStream();
+            res.CopyTo(ms);
+            File.WriteAllBytes(profilerDllPath, ms.ToArray());
+            ms.Position = 0;
+            using var profAsm = AssemblyDefinition.ReadAssembly(ms);
+            var profType = FindOrThrow(profAsm.MainModule.Types, t => t.FullName == "NativePatchProfiler.Prof", "NativePatchProfiler.Prof");
+            var mInit = module.ImportReference(FindOrThrow(profType.Methods, m => m.Name == "Init", "Prof.Init"));
+            var mBegin = module.ImportReference(FindOrThrow(profType.Methods, m => m.Name == "Begin", "Prof.Begin"));
+            var mEnd = module.ImportReference(FindOrThrow(profType.Methods, m => m.Name == "End", "Prof.End"));
+            var mEndScope = module.ImportReference(FindOrThrow(profType.Methods, m => m.Name == "EndScope", "Prof.EndScope"));
+            var mFrame = module.ImportReference(FindOrThrow(profType.Methods, m => m.Name == "Frame", "Prof.Frame"));
+
+            var names = new List<string>();
+            var done = new HashSet<MethodDefinition>();
+
+            // Prologue: t = Prof.Begin(). Every ret becomes "br epilogue"; epilogue reports and returns.
+            // Rets are never inside protected regions in valid IL, and keeping the same Instruction objects
+            // preserves all branch targets and exception-handler boundaries.
+            void Instrument(MethodDefinition m, Func<ILProcessor, VariableDefinition, Instruction[]> report)
+            {
+                var body = m.Body;
+                body.SimplifyMacros();
+                var tVar = new VariableDefinition(module.TypeSystem.Int64);
+                body.Variables.Add(tVar);
+                VariableDefinition? retVar = null;
+                if (m.ReturnType.MetadataType != MetadataType.Void)
+                {
+                    retVar = new VariableDefinition(m.ReturnType);
+                    body.Variables.Add(retVar);
+                }
+                body.InitLocals = true;
+                var il = body.GetILProcessor();
+                var rets = body.Instructions.Where(i => i.OpCode == OpCodes.Ret).ToList();
+
+                var epilogue = new List<Instruction>();
+                if (retVar != null) epilogue.Add(il.Create(OpCodes.Stloc, retVar));
+                epilogue.AddRange(report(il, tVar));
+                if (retVar != null) epilogue.Add(il.Create(OpCodes.Ldloc, retVar));
+                epilogue.Add(il.Create(OpCodes.Ret));
+                foreach (var e in epilogue) il.Append(e);
+
+                foreach (var r in rets) { r.OpCode = OpCodes.Br; r.Operand = epilogue[0]; }
+
+                var first = body.Instructions[0];
+                il.InsertBefore(first, il.Create(OpCodes.Call, mBegin));
+                il.InsertBefore(first, il.Create(OpCodes.Stloc, tVar));
+                body.OptimizeMacros();
+                done.Add(m);
+            }
+
+            void InstrumentById(MethodDefinition m, string name)
+            {
+                if (done.Contains(m) || !m.HasBody) return;
+                int id = names.Count;
+                names.Add(name);
+                Instrument(m, (il, t) => new[] { il.Create(OpCodes.Ldc_I4, id), il.Create(OpCodes.Ldloc, t), il.Create(OpCodes.Call, mEnd) });
+            }
+
+            bool IsMonoBehaviour(TypeDefinition t)
+            {
+                for (var bt = t.BaseType; bt != null;)
+                {
+                    if (bt.FullName == "UnityEngine.MonoBehaviour") return true;
+                    TypeDefinition? def;
+                    try { def = bt.Resolve(); } catch { return false; }
+                    bt = def?.BaseType;
+                }
+                return false;
+            }
+
+            // 1. Unity message methods: top-level per-frame work, one section per type
+            int messages = 0;
+            foreach (var type in module.GetTypes().Where(IsMonoBehaviour).ToList())
+            {
+                foreach (var m in type.Methods.Where(m => !m.IsStatic && m.HasBody && m.Parameters.Count == 0 && !m.HasGenericParameters &&
+                                                          m.ReturnType.MetadataType == MetadataType.Void &&
+                                                          (m.Name == "Update" || m.Name == "LateUpdate" || m.Name == "FixedUpdate")).ToList())
+                {
+                    InstrumentById(m, $"{type.Name}.{m.Name}");
+                    messages++;
+                }
+            }
+            Console.WriteLine($"  + Unity messages instrumented: {messages} Update/LateUpdate/FixedUpdate methods");
+
+            // 2. MonoUpdaters batches, keyed by the game's own profiler scope strings
+            var extra = module.Types.FirstOrDefault(t => t.Name == "MonoUpdatersExtra");
+            int scopes = 0;
+            if (extra != null)
+            {
+                foreach (var m in extra.Methods.Where(m => m.HasBody && m.Parameters.Any(p => p.Name == "profileScope")).ToList())
+                {
+                    var scopeParam = m.Parameters.First(p => p.Name == "profileScope");
+                    Instrument(m, (il, t) => new[] { il.Create(OpCodes.Ldarg, scopeParam), il.Create(OpCodes.Ldloc, t), il.Create(OpCodes.Call, mEndScope) });
+                    scopes++;
+                }
+            }
+            Console.WriteLine($"  + MonoUpdaters batches instrumented: {scopes} methods (per-category timings)");
+
+            // 3. Known heavy methods that run nested inside the messages above
+            var nested = new (string Type, string Method)[]
+            {
+                ("ZNetScene", "CreateDestroyObjects"), ("ZNetScene", "CreateObjects"), ("ZNetScene", "RemoveObjects"),
+                ("ZoneSystem", "CreateLocalZones"), ("ZoneSystem", "SpawnZone"),
+                ("Heightmap", "Regenerate"), ("Heightmap", "RebuildCollisionMesh"), ("Heightmap", "RebuildRenderMesh"),
+                ("Minimap", "Explore"), ("WearNTearUpdater", "UpdateWearNTear"),
+                ("ZNet", "Save"), ("ZNet", "SaveWorld"), ("Game", "SavePlayerProfile"), ("Game", "CollectResources"),
+            };
+            foreach (var (typeName, methodName) in nested)
+            {
+                var type = module.Types.FirstOrDefault(t => t.Name == typeName);
+                // Explore(int,int) is the per-pixel overload; only time the per-tick Explore(Vector3,float)
+                var targets = type?.Methods.Where(m => m.Name == methodName && m.HasBody && !m.HasGenericParameters &&
+                                                       !(methodName == "Explore" && m.Parameters.Count == 2 && m.Parameters[0].ParameterType.MetadataType == MetadataType.Int32)).ToList();
+                if (targets == null || targets.Count == 0)
+                {
+                    Console.WriteLine($"  ! {typeName}.{methodName} not found, skipped");
+                    continue;
+                }
+                foreach (var m in targets) InstrumentById(m, $">{typeName}.{methodName}");
+            }
+            Console.WriteLine($"  + Nested hot-path methods instrumented: {nested.Length} targets");
+
+            // 4. Section names + frame marker at the start of Game.Update
+            var gameType = FindOrThrow(module.Types, t => t.Name == "Game", "Game");
+            var gameAwake = FindOrThrow(gameType.Methods, m => m.Name == "Awake", "Game.Awake");
+            var ilA = gameAwake.Body.GetILProcessor();
+            var firstA = gameAwake.Body.Instructions[0];
+            ilA.InsertBefore(firstA, ilA.Create(OpCodes.Ldstr, string.Join("|", names)));
+            ilA.InsertBefore(firstA, ilA.Create(OpCodes.Call, mInit));
+
+            var gameUpdate = FindOrThrow(gameType.Methods, m => m.Name == "Update", "Game.Update");
+            var ilU = gameUpdate.Body.GetILProcessor();
+            ilU.InsertBefore(gameUpdate.Body.Instructions[0], ilU.Create(OpCodes.Call, mFrame));
+
+            var wnt = FindOrThrow(module.Types, t => t.Name == "WearNTear", "WearNTear");
+            wnt.Fields.Add(new FieldDefinition(ProfilerMarkerField, FieldAttributes.Private | FieldAttributes.Static, module.TypeSystem.Boolean));
+            Console.WriteLine($"  + {names.Count} named sections, frame marker in Game.Update, helper written to {profilerDllPath}");
+        }
+
         // ==================== V8 PATCH IMPLEMENTATIONS ====================
 
         static void ApplyHeightmapZeroAllocV8(TypeDefinition hmType)
@@ -1901,6 +2237,7 @@ namespace ValheimPatcher
                 MarkerFieldNameV5 => PatchVersion.V5,
                 MarkerFieldNameV6 => PatchVersion.V6,
                 MarkerFieldNameV7 => PatchVersion.V7,
+                MarkerFieldNameV9 => PatchVersion.V9,
                 _ => PatchVersion.V8
             };
             PatchVersion verToVerify = targetVer ?? detected;
@@ -1908,7 +2245,7 @@ namespace ValheimPatcher
             Console.WriteLine($"Detected marker: {marker.Name} -> verifying against {verToVerify.ToString().ToLower()} ruleset...\n");
 
             int checksPassed = 0;
-            int totalChecks = verToVerify == PatchVersion.V8 ? 12 : (verToVerify == PatchVersion.V7 ? 10 : (verToVerify == PatchVersion.V6 ? 9 : 8));
+            int totalChecks = verToVerify == PatchVersion.V9 ? 12 : verToVerify == PatchVersion.V8 ? 12 : (verToVerify == PatchVersion.V7 ? 10 : (verToVerify == PatchVersion.V6 ? 9 : 8));
 
             void AssertCheck(bool condition, string name, string details)
             {
@@ -1926,7 +2263,81 @@ namespace ValheimPatcher
                 Console.ResetColor();
             }
 
-            if (verToVerify == PatchVersion.V8)
+            if (verToVerify == PatchVersion.V9)
+            {
+                // 1. Marker check
+                AssertCheck(marker.Name == MarkerFieldNameV9, "Marker v9", $"Found marker {marker.Name}");
+
+                // 2. WearNTear: vanilla support logic, no frame stagger gate
+                var updateWear = FindOrThrow(wnt.Methods, m => m.Name == "UpdateWear", "WearNTear.UpdateWear");
+                bool noStaggerGate = !wnt.Methods.Any(m => m.Name == "ShouldUpdateSupport")
+                                  && !updateWear.Body.Instructions.Any(i => i.Operand?.ToString()?.Contains("ShouldUpdateSupport") == true)
+                                  && updateWear.Body.Instructions.Any(i => i.OpCode == OpCodes.Call && i.Operand?.ToString()?.Contains("UpdateSupport") == true);
+                AssertCheck(noStaggerGate, "P0 WearNTear Vanilla Support", "UpdateSupport runs every wear tick (vanilla cache, no 1/8 frame stagger)");
+
+                // 3. WearNTearUpdater: adaptive upper clamp 100 replaced by per-frame cap
+                var updater = FindOrThrow(module.Types, t => t.Name == "WearNTearUpdater", "WearNTearUpdater");
+                var updateWnt = FindOrThrow(updater.Methods, m => m.Name == "UpdateWearNTear", "WearNTearUpdater.UpdateWearNTear");
+                bool updaterCapped = !updateWnt.Body.Instructions.Any(i => i.OpCode == OpCodes.Ldc_I4_S && (sbyte)i.Operand == 100);
+                AssertCheck(updaterCapped, "P1 WearNTearUpdater Cap", "Upper clamp of pieces/frame lowered from vanilla 100");
+
+                // 4. Fire: vanilla 1.0s dot interval (damage per tick unchanged)
+                var fire = FindOrThrow(module.Types, t => t.Name == "Fire", "Fire");
+                var fireCtor = FindOrThrow(fire.Methods, m => m.IsConstructor && !m.IsStatic, "Fire..ctor");
+                int dotIdx = fireCtor.Body.Instructions.ToList().FindIndex(i => i.Operand is FieldReference fr && fr.Name == "m_dotInterval");
+                bool fireVanilla = dotIdx > 0 && fireCtor.Body.Instructions[dotIdx - 1].Operand is float dot && dot == 1.0f;
+                AssertCheck(fireVanilla, "P0 Fire Balance", "m_dotInterval kept at vanilla 1.0s");
+
+                // 5. Heightmap: cooking options = FastMidphase only (16)
+                var hm = FindOrThrow(module.Types, t => t.Name == "Heightmap", "Heightmap");
+                var hmAwake = FindOrThrow(hm.Methods, m => m.Name == "Awake", "Heightmap.Awake");
+                var hmInstrs = hmAwake.Body.Instructions;
+                bool fastCooking = hmInstrs.Any(i => i.OpCode == OpCodes.Callvirt && i.Operand?.ToString()?.Contains("set_cookingOptions") == true
+                                                  && i.Previous?.OpCode == OpCodes.Ldc_I4_S && (sbyte)i.Previous.Operand == 16);
+                AssertCheck(fastCooking, "P1 Heightmap Fast Cooking", "MeshCollider.cookingOptions = UseFastMidphase (no cleaning/welding)");
+
+                // 6. Point light limits 4/10/16
+                var gsm = FindOrThrow(module.Types, t => t.Name == "GraphicsSettingsManager", "GraphicsSettingsManager");
+                var getPointLightLimit = FindOrThrow(gsm.Methods, m => m.Name == "GetPointLightLimit", "GetPointLightLimit");
+                bool lightsRaised = getPointLightLimit.Body.Instructions.Any(i => i.OpCode == OpCodes.Ldc_I4_S && (sbyte)i.Operand == 10)
+                                 && getPointLightLimit.Body.Instructions.Any(i => i.OpCode == OpCodes.Ldc_I4_S && (sbyte)i.Operand == 16);
+                AssertCheck(lightsRaised, "P1 Point Light Limits", "Low/Med/High = 4/10/16");
+
+                // 7. ClutterSystem Off == 0.0m
+                var clutter = FindOrThrow(module.Types, t => t.Name == "ClutterSystem", "ClutterSystem");
+                var applySettings = FindOrThrow(clutter.Methods, m => m.Name == "ApplySettings", "ClutterSystem.ApplySettings");
+                bool clutterHandlesOff = applySettings.Body.Instructions.Any(i => i.OpCode == OpCodes.Ldc_R4 && (float)i.Operand == 0.0f);
+                AssertCheck(clutterHandlesOff, "P1 ClutterSystem Quality Logic", "Sets 0m vegetation distance when Quality is Off");
+
+                // 8. Character.Awake combat preservation
+                var character = FindOrThrow(module.Types, t => t.Name == "Character", "Character");
+                var charAwake = FindOrThrow(character.Methods, m => m.Name == "Awake", "Character.Awake");
+                bool charProtectsCombat = charAwake.Body.Instructions.Any(i => i.OpCode == OpCodes.Isinst && i.Operand?.ToString()?.Contains("Humanoid") == true)
+                                       && charAwake.Body.Instructions.Any(i => i.OpCode == OpCodes.Ldfld && i.Operand?.ToString()?.Contains("m_tamed") == true);
+                AssertCheck(charProtectsCombat, "P0/P1 Combat Hitbox Preservation", "Excludes all Humanoids, Bosses, and Tamed pets from CullUpdateTransforms");
+
+                // 9. EffectList SetParent(parent, true)
+                var effectList = FindOrThrow(module.Types, t => t.Name == "EffectList", "EffectList");
+                var create = FindOrThrow(effectList.Methods, m => m.Name == "Create" && m.Parameters.Count == 6, "EffectList.Create");
+                bool elUsesSetParentTrue = create.Body.Instructions.Any(i => i.OpCode == OpCodes.Ldc_I4_1)
+                                        && create.Body.Instructions.Any(i => i.OpCode == OpCodes.Callvirt && i.Operand?.ToString()?.Contains("SetParent(UnityEngine.Transform,System.Boolean)") == true);
+                AssertCheck(elUsesSetParentTrue, "P1 EffectList Transform Integrity", "Uses SetParent(parent, true) preserving world position, rotation and scale");
+
+                // 10. EffectList 45m range threshold
+                bool elExtendedRange = create.Body.Instructions.Any(i => i.OpCode == OpCodes.Ldc_R4 && (float)i.Operand == 45.0f);
+                AssertCheck(elExtendedRange, "P1 EffectList Combat Range", "45m distance threshold preserves archery sounds and combat particles");
+
+                // 11. Ragdoll safety
+                var ragdoll = FindOrThrow(module.Types, t => t.Name == "Ragdoll", "Ragdoll");
+                bool ragdollNoLeak = !ragdoll.Fields.Any(f => f.Name == "s_activeRagdolls");
+                var ragdollAwake = FindOrThrow(ragdoll.Methods, m => m.Name == "Awake", "Ragdoll.Awake");
+                bool ragdollClampsTtl = ragdollAwake.Body.Instructions.Any(i => i.OpCode == OpCodes.Ldc_R4 && (float)i.Operand <= 3.5f);
+                AssertCheck(ragdollNoLeak && ragdollClampsTtl, "P2 Ragdoll Safety", "Clean PhysX release at TTL<=3.5s with zero static buffer leak");
+
+                // 12. All subsystems verified
+                AssertCheck(checksPassed == totalChecks - 1, "Overall Integrity", $"All {checksPassed}/{totalChecks - 1} subsystem audits passed successfully!");
+            }
+            else if (verToVerify == PatchVersion.V8)
             {
                 // 1. Marker check
                 AssertCheck(marker.Name == MarkerFieldNameV8, "Marker v8", $"Found marker {marker.Name}");

@@ -1,0 +1,13 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- Loaded by the game's Mono runtime from the Managed folder, so it must stay netstandard2.0 with no Unity references. -->
+  <PropertyGroup>
+    <TargetFramework>netstandard2.0</TargetFramework>
+    <AssemblyName>NativePatchProfiler</AssemblyName>
+    <RootNamespace>NativePatchProfiler</RootNamespace>
+    <LangVersion>latest</LangVersion>
+    <Nullable>disable</Nullable>
+    <DebugType>none</DebugType>
+  </PropertyGroup>
+
+</Project>

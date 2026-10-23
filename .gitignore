@@ -4,3 +4,8 @@ valheim.app/
 Patcher/bin/
 Patcher/obj/
 .DS_Store
+dist/
+autopatch.log
+autopatch.log.tmp
+NativeProfiler/bin/
+NativeProfiler/obj/

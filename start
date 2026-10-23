@@ -19,7 +19,14 @@ case "$ACTION" in
     restore)
         "$SCRIPT_DIR/patch.sh" --restore "$@"
         ;;
-    v5|v6|v7|v8)
+    dist)
+        "$SCRIPT_DIR/make-dist.sh"
+        ;;
+    ensure)
+        "$SCRIPT_DIR/autopatch.sh"
+        tail -n 5 "$SCRIPT_DIR/autopatch.log"
+        ;;
+    v5|v6|v7|v8|v9)
         "$SCRIPT_DIR/patch.sh" "$ACTION" "$@"
         ;;
     help|--help|-h|"")
@@ -27,15 +34,19 @@ case "$ACTION" in
         echo "     Valheim Native IL Patcher Runner                    "
         echo "========================================================="
         echo "Usage:"
-        echo "  ./start patch v8       Apply patch v8 (Recommended: Zero-Stutter Anti-Pattern Elimination)"
+        echo "  ./start patch v9       Apply patch v9 (Recommended: v7 + vanilla-correct support/fire, fast terrain cooking)"
+        echo "  ./start patch v8       Apply patch v8 (Zero-Stutter Anti-Pattern Elimination)"
         echo "  ./start patch v7       Apply patch v7 (Stable Engine, Physics & Combat Fixes)"
         echo "  ./start patch v6       Apply patch v6 (Legacy Stable)"
         echo "  ./start patch v5       Apply patch v5 (Legacy Optimization)"
         echo "  ./start patch status   Check current patch marker & status"
         echo "  ./start patch verify   Verify patch integrity in assembly"
         echo "  ./start patch restore  Restore original vanilla assembly"
+        echo "  ./start dist           Build dist/ValheimPatcher-win-x64.zip for Windows friends"
+        echo "  ./start ensure         Re-apply v9 only if missing (same check Steam runs via autopatch.sh)"
         echo ""
         echo "Direct shortcuts also supported:"
+        echo "  ./start v9             Same as './start patch v9'"
         echo "  ./start v8             Same as './start patch v8'"
         echo "  ./start v7             Same as './start patch v7'"
         echo "  ./start v6             Same as './start patch v6'"

@@ -11,4 +11,10 @@
     <PackageReference Include="Mono.Cecil" Version="0.11.6" />
   </ItemGroup>
 
+  <!-- Profiler helper: built first, then embedded so a single-file patcher can drop it into the game's Managed folder -->
+  <ItemGroup>
+    <ProjectReference Include="../NativeProfiler/NativeProfiler.csproj" ReferenceOutputAssembly="false" GlobalPropertiesToRemove="RuntimeIdentifier;SelfContained;PublishSingleFile;EnableCompressionInSingleFile" />
+    <EmbeddedResource Include="../NativeProfiler/bin/$(Configuration)/netstandard2.0/NativePatchProfiler.dll" LogicalName="NativePatchProfiler.dll" />
+  </ItemGroup>
+
 </Project>
