@@ -41,6 +41,21 @@ case $rc in
 esac
 
 if [ "$#" -gt 0 ]; then
+    # Steam on macOS passes the .app bundle itself as %command%, which can't be exec'd.
+    # Run the bundle's binary directly so Steam keeps tracking this process (overlay, playtime).
+    if [ -d "$1" ] && [[ "$1" == *.app ]]; then
+        app="$1"; shift
+        exe_name="$(/usr/libexec/PlistBuddy -c "Print :CFBundleExecutable" "$app/Contents/Info.plist" 2>/dev/null)"
+        set -- "$app/Contents/MacOS/${exe_name:-Valheim}" "$@"
+        # Universal binary: force the native slice even if this shell was spawned under Rosetta
+        if [ "$(sysctl -n hw.optional.arm64 2>/dev/null)" = "1" ]; then
+            set -- arch -arm64 "$@"
+        fi
+    fi
+    echo "launch: $*" >> "$LOG"
+    if [ -n "$AUTOPATCH_DRY_RUN" ]; then
+        exit 0
+    fi
     exec "$@"
 fi
 [ "$rc" -eq 3 ] && exit 0
