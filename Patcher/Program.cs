@@ -26,7 +26,8 @@ namespace ValheimPatcher
         public const string MarkerFieldNameV6 = "s_nativePatched_v6";
         public const string MarkerFieldNameV7 = "s_nativePatched_v7";
         public const string MarkerFieldNameV8 = "s_nativePatched_v8";
-        public const string MarkerFieldNameV9 = "s_nativePatched_v9";
+        // v9.2: heightmap rebuild budget + vanilla object streaming rate; bumping the marker makes "ensure" upgrade older v9 installs
+        public const string MarkerFieldNameV9 = "s_nativePatched_v9_2";
 
         /// <summary>Safe lookup with descriptive error on game version mismatch.</summary>
         static T FindOrThrow<T>(IEnumerable<T> source, Func<T, bool> predicate, string context)
@@ -119,7 +120,7 @@ namespace ValheimPatcher
             PatchVersion? verifyVersion = null;
 
             int physicsSteps = 4;
-            int spawnLimit = 25;
+            int? spawnLimitArg = null;
             int updatesPerFrame = 20;
             float vegetationDistance = 40.0f;
             string managedDir = "";
@@ -213,7 +214,7 @@ namespace ValheimPatcher
                 }
                 else if (arg == "--spawn-limit" && i + 1 < args.Length && int.TryParse(args[i + 1], out int sl))
                 {
-                    spawnLimit = Math.Max(1, sl); i++;
+                    spawnLimitArg = Math.Max(1, sl); i++;
                 }
                 else if (arg == "--updates-per-frame" && i + 1 < args.Length && int.TryParse(args[i + 1], out int upf))
                 {
@@ -295,6 +296,8 @@ namespace ValheimPatcher
                 return 1;
             }
 
+            int spawnLimit = spawnLimitArg ?? (targetVersion == PatchVersion.V9 ? 10 : 25);
+
             if (statusMode) { CheckStatus(dllPath, bakPath, managedDir); return 0; }
             if (restoreMode) return RestoreBackup(dllPath, bakPath);
             if (verifyMode) return VerifyPatches(dllPath, managedDir, verifyVersion);
@@ -358,7 +361,7 @@ namespace ValheimPatcher
             {
                 Console.ForegroundColor = ConsoleColor.Green;
                 if (marker.Name == MarkerFieldNameV9)
-                    Console.WriteLine($"Status: ALREADY PATCHED (marker: {marker.Name} [v9 - Vanilla-Correct Engine Fixes])");
+                    Console.WriteLine($"Status: ALREADY PATCHED (marker: {marker.Name} [v9.2 - Vanilla-Correct Engine Fixes])");
                 else if (marker.Name == MarkerFieldNameV8)
                     Console.WriteLine($"Status: ALREADY PATCHED (marker: {marker.Name} [v8 - Zero Stutter & Stability])");
                 else if (marker.Name == MarkerFieldNameV7)
@@ -554,6 +557,11 @@ namespace ValheimPatcher
             // v9: 16 = FastMidphase only. The heightmap grid has no degenerate tris or duplicate verts,
             // so cleaning/welding is wasted main-thread cook time on every terrain edit and chunk load.
             ApplyHeightmapPatches(heightmapType, setCookingOptions, targetVersion == PatchVersion.V9 ? 16 : 30);
+            if (targetVersion == PatchVersion.V9)
+            {
+                var getRealtimeDouble = module.ImportReference(FindOrThrow(timeType.Methods, m => m.Name == "get_realtimeSinceStartupAsDouble", "Time.get_realtimeSinceStartupAsDouble"));
+                ApplyHeightmapRegenBudget(heightmapType, getFrameCount, getRealtimeDouble, 0.004);
+            }
             if (targetVersion == PatchVersion.V8)
             {
                 ApplyHeightmapZeroAllocV8(heightmapType);
@@ -869,6 +877,59 @@ namespace ValheimPatcher
                     break;
                 }
             }
+        }
+
+        /// <summary>
+        /// Vanilla rebuilds every queued (Poke(2)) terrain chunk in the same LateUpdate, which the profiler showed
+        /// as 10-47 ms spikes. Keep the first rebuild of each frame, then only continue while under the budget;
+        /// the rest stay queued (m_doLateUpdate == 2) and rebuild on the following frames.
+        /// </summary>
+        static void ApplyHeightmapRegenBudget(TypeDefinition heightmapType, MethodReference getFrameCount, MethodReference getRealtimeDouble, double budgetSeconds)
+        {
+            var module = heightmapType.Module;
+            var clu = FindOrThrow(heightmapType.Methods, m => m.Name == "CustomLateUpdate", "Heightmap.CustomLateUpdate");
+            var instrs = clu.Body.Instructions;
+
+            // Expected vanilla shape: ldarg.0; ldfld m_doLateUpdate; ldc.i4.2; bne.un(.s) RET; ldarg.0; ldc.i4.0; stfld m_doLateUpdate; ...; ret
+            int bneIdx = -1;
+            for (int i = 2; i < instrs.Count; i++)
+                if ((instrs[i].OpCode == OpCodes.Bne_Un_S || instrs[i].OpCode == OpCodes.Bne_Un) && instrs[i - 1].OpCode == OpCodes.Ldc_I4_2 &&
+                    instrs[i - 2].Operand is FieldReference fr && fr.Name == "m_doLateUpdate")
+                { bneIdx = i; break; }
+            var ret = instrs[instrs.Count - 1];
+            if (bneIdx < 0 || ret.OpCode != OpCodes.Ret || instrs[bneIdx].Operand != ret)
+                throw new InvalidOperationException("[PATCH ERROR] Heightmap.CustomLateUpdate: unexpected IL (expected m_doLateUpdate == 2 guard)");
+
+            var fFrame = new FieldDefinition("s_nativeRegenFrame", FieldAttributes.Private | FieldAttributes.Static, module.TypeSystem.Int32);
+            var fStart = new FieldDefinition("s_nativeRegenStart", FieldAttributes.Private | FieldAttributes.Static, module.TypeSystem.Double);
+            heightmapType.Fields.Add(fFrame);
+            heightmapType.Fields.Add(fStart);
+
+            clu.Body.SimplifyMacros();
+            var il = clu.Body.GetILProcessor();
+            var cont = instrs[bneIdx + 1];
+            var sameFrame = il.Create(OpCodes.Call, getRealtimeDouble);
+            var block = new[]
+            {
+                // if (Time.frameCount != s_nativeRegenFrame) { s_nativeRegenFrame = Time.frameCount; s_nativeRegenStart = now; }
+                il.Create(OpCodes.Call, getFrameCount),
+                il.Create(OpCodes.Ldsfld, fFrame),
+                il.Create(OpCodes.Beq, sameFrame),
+                il.Create(OpCodes.Call, getFrameCount),
+                il.Create(OpCodes.Stsfld, fFrame),
+                il.Create(OpCodes.Call, getRealtimeDouble),
+                il.Create(OpCodes.Stsfld, fStart),
+                il.Create(OpCodes.Br, cont),
+                // else if (now - s_nativeRegenStart > budget) return;  // stays queued for the next frame
+                sameFrame,
+                il.Create(OpCodes.Ldsfld, fStart),
+                il.Create(OpCodes.Sub),
+                il.Create(OpCodes.Ldc_R8, budgetSeconds),
+                il.Create(OpCodes.Bgt, ret),
+            };
+            foreach (var b in block) il.InsertBefore(cont, b);
+            clu.Body.OptimizeMacros();
+            Console.WriteLine($"  + Heightmap.CustomLateUpdate: queued chunk rebuilds limited to {budgetSeconds * 1000:0} ms/frame (first always runs)");
         }
 
         static void ApplyMessageHudCanvasIsolation(TypeDefinition messageHudType, MethodReference getGameObject, MethodReference getCompCanvas, MethodReference addCompCanvas)
@@ -2237,7 +2298,7 @@ namespace ValheimPatcher
                 MarkerFieldNameV5 => PatchVersion.V5,
                 MarkerFieldNameV6 => PatchVersion.V6,
                 MarkerFieldNameV7 => PatchVersion.V7,
-                MarkerFieldNameV9 => PatchVersion.V9,
+                _ when marker.Name.StartsWith("s_nativePatched_v9") => PatchVersion.V9,
                 _ => PatchVersion.V8
             };
             PatchVersion verToVerify = targetVer ?? detected;
@@ -2245,7 +2306,7 @@ namespace ValheimPatcher
             Console.WriteLine($"Detected marker: {marker.Name} -> verifying against {verToVerify.ToString().ToLower()} ruleset...\n");
 
             int checksPassed = 0;
-            int totalChecks = verToVerify == PatchVersion.V9 ? 12 : verToVerify == PatchVersion.V8 ? 12 : (verToVerify == PatchVersion.V7 ? 10 : (verToVerify == PatchVersion.V6 ? 9 : 8));
+            int totalChecks = verToVerify == PatchVersion.V9 ? 13 : verToVerify == PatchVersion.V8 ? 12 : (verToVerify == PatchVersion.V7 ? 10 : (verToVerify == PatchVersion.V6 ? 9 : 8));
 
             void AssertCheck(bool condition, string name, string details)
             {
@@ -2334,7 +2395,14 @@ namespace ValheimPatcher
                 bool ragdollClampsTtl = ragdollAwake.Body.Instructions.Any(i => i.OpCode == OpCodes.Ldc_R4 && (float)i.Operand <= 3.5f);
                 AssertCheck(ragdollNoLeak && ragdollClampsTtl, "P2 Ragdoll Safety", "Clean PhysX release at TTL<=3.5s with zero static buffer leak");
 
-                // 12. All subsystems verified
+                // 12. Heightmap rebuild budget: queued chunks spread across frames
+                var hmBudget = FindOrThrow(module.Types, t => t.Name == "Heightmap", "Heightmap");
+                var clu = FindOrThrow(hmBudget.Methods, m => m.Name == "CustomLateUpdate", "Heightmap.CustomLateUpdate");
+                bool hasBudget = clu.Body.Instructions.Any(i => i.Operand?.ToString()?.Contains("get_realtimeSinceStartupAsDouble") == true)
+                              && clu.Body.Instructions.Any(i => i.OpCode == OpCodes.Ldsfld && i.Operand?.ToString()?.Contains("s_nativeRegenStart") == true);
+                AssertCheck(hasBudget, "P1 Heightmap Rebuild Budget", "Queued terrain chunks rebuild within a 4 ms/frame budget (first one always runs)");
+
+                // 13. All subsystems verified
                 AssertCheck(checksPassed == totalChecks - 1, "Overall Integrity", $"All {checksPassed}/{totalChecks - 1} subsystem audits passed successfully!");
             }
             else if (verToVerify == PatchVersion.V8)
