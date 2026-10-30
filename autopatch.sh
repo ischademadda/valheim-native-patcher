@@ -41,16 +41,23 @@ case $rc in
 esac
 
 if [ "$#" -gt 0 ]; then
-    # Steam on macOS passes the .app bundle itself as %command%, which can't be exec'd.
-    # Run the bundle's binary directly so Steam keeps tracking this process (overlay, playtime).
+    # Steam on macOS passes the .app bundle itself as %command%. Launch it through LaunchServices
+    # ("open"), exactly like Steam does without launch options: exec'ing the binary directly skips
+    # the normal app launch, so macOS Game Mode / foreground priority may not apply.
+    # -W keeps this script alive until the game quits, so Steam still tracks the session.
     if [ -d "$1" ] && [[ "$1" == *.app ]]; then
         app="$1"; shift
-        exe_name="$(/usr/libexec/PlistBuddy -c "Print :CFBundleExecutable" "$app/Contents/Info.plist" 2>/dev/null)"
-        set -- "$app/Contents/MacOS/${exe_name:-Valheim}" "$@"
-        # Universal binary: force the native slice even if this shell was spawned under Rosetta
-        if [ "$(sysctl -n hw.optional.arm64 2>/dev/null)" = "1" ]; then
-            set -- arch -arm64 "$@"
-        fi
+        # LaunchServices does not inherit our environment: forward Steam's variables explicitly,
+        # otherwise the game may think it wasn't started by Steam and relaunch itself through it.
+        env_args=()
+        for name in $(compgen -e); do
+            case "$name" in
+                Steam*|STEAM*|SDL_*|DYLD_INSERT_LIBRARIES) env_args+=(--env "$name=${!name}") ;;
+            esac
+        done
+        [ -z "$SteamAppId" ] && env_args+=(--env "SteamAppId=892970")
+        [ -z "$SteamGameId" ] && env_args+=(--env "SteamGameId=892970")
+        set -- open -W -a "$app" "${env_args[@]}" --args "$@"
     fi
     echo "launch: $*" >> "$LOG"
     if [ -n "$AUTOPATCH_DRY_RUN" ]; then
