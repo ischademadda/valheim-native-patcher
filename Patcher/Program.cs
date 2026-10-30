@@ -26,8 +26,9 @@ namespace ValheimPatcher
         public const string MarkerFieldNameV6 = "s_nativePatched_v6";
         public const string MarkerFieldNameV7 = "s_nativePatched_v7";
         public const string MarkerFieldNameV8 = "s_nativePatched_v8";
-        // v9.2: heightmap rebuild budget + vanilla object streaming rate; bumping the marker makes "ensure" upgrade older v9 installs
-        public const string MarkerFieldNameV9 = "s_nativePatched_v9_2";
+        // v9.3: vanilla terrain cooking options (v9.2: heightmap rebuild budget + vanilla object streaming rate).
+        // Bumping the marker makes "ensure" upgrade older v9 installs.
+        public const string MarkerFieldNameV9 = "s_nativePatched_v9_3";
 
         /// <summary>Safe lookup with descriptive error on game version mismatch.</summary>
         static T FindOrThrow<T>(IEnumerable<T> source, Func<T, bool> predicate, string context)
@@ -233,7 +234,7 @@ namespace ValheimPatcher
 
             string verTag = targetVersion switch
             {
-                PatchVersion.V9 => "v9 (v7 + Vanilla-Correct Support, Fire & Terrain Cooking - Recommended)",
+                PatchVersion.V9 => "v9.3 (v7 + Vanilla-Correct Support & Fire, Terrain Rebuild Budget - Recommended)",
                 PatchVersion.V8 => "v8 (Zero-Stutter Anti-Pattern Elimination)",
                 PatchVersion.V7 => "v7 (Engine & Gameplay Fixes Edition)",
                 PatchVersion.V6 => "v6 (Robust Network & Gameplay Edition)",
@@ -324,7 +325,7 @@ namespace ValheimPatcher
             Console.WriteLine("       ./patch.sh [v5|v6|v7|v8|v9|--status|--verify|--restore]");
             Console.WriteLine("       ./start patch [v5|v6|v7|v8|v9|status|verify|restore]");
             Console.WriteLine("\nVersions:");
-            Console.WriteLine("  v9                         Apply v9 patch set (Recommended, v7 + vanilla-correct support/fire, fast terrain cooking)");
+            Console.WriteLine("  v9                         Apply v9 patch set (Recommended, v7 + vanilla-correct support/fire, terrain rebuild budget)");
             Console.WriteLine("  v8                         Apply v8 patch set (Zero-stutter anti-pattern fixes)");
             Console.WriteLine("  v7                         Apply v7 patch set (Engine bugfixes & combat stability)");
             Console.WriteLine("  v6                         Apply v6 patch set (Legacy network & stability fixes)");
@@ -361,7 +362,7 @@ namespace ValheimPatcher
             {
                 Console.ForegroundColor = ConsoleColor.Green;
                 if (marker.Name == MarkerFieldNameV9)
-                    Console.WriteLine($"Status: ALREADY PATCHED (marker: {marker.Name} [v9.2 - Vanilla-Correct Engine Fixes])");
+                    Console.WriteLine($"Status: ALREADY PATCHED (marker: {marker.Name} [v9.3 - Vanilla-Correct Engine Fixes])");
                 else if (marker.Name == MarkerFieldNameV8)
                     Console.WriteLine($"Status: ALREADY PATCHED (marker: {marker.Name} [v8 - Zero Stutter & Stability])");
                 else if (marker.Name == MarkerFieldNameV7)
@@ -554,9 +555,9 @@ namespace ValheimPatcher
             Console.WriteLine("\n[6/18] Patching Heightmap PhysX FastMidphase cooking options & zero-alloc mesh...");
             var heightmapType = FindOrThrow(module.Types, t => t.Name == "Heightmap", "Heightmap");
             // 30 = Unity default (FasterSimulation|MeshCleaning|WeldVertices|FastMidphase), i.e. a no-op.
-            // v9: 16 = FastMidphase only. The heightmap grid has no degenerate tris or duplicate verts,
-            // so cleaning/welding is wasted main-thread cook time on every terrain edit and chunk load.
-            ApplyHeightmapPatches(heightmapType, setCookingOptions, targetVersion == PatchVersion.V9 ? 16 : 30);
+            // v9 keeps it: dropping CookForFasterSimulation (16) made cooking cheaper but every PhysX step against
+            // terrain slower, and sessions on it were physics/engine-bound. Rebuild spikes are handled by the regen budget.
+            ApplyHeightmapPatches(heightmapType, setCookingOptions, 30);
             if (targetVersion == PatchVersion.V9)
             {
                 var getRealtimeDouble = module.ImportReference(FindOrThrow(timeType.Methods, m => m.Name == "get_realtimeSinceStartupAsDouble", "Time.get_realtimeSinceStartupAsDouble"));
@@ -2349,13 +2350,13 @@ namespace ValheimPatcher
                 bool fireVanilla = dotIdx > 0 && fireCtor.Body.Instructions[dotIdx - 1].Operand is float dot && dot == 1.0f;
                 AssertCheck(fireVanilla, "P0 Fire Balance", "m_dotInterval kept at vanilla 1.0s");
 
-                // 5. Heightmap: cooking options = FastMidphase only (16)
+                // 5. Heightmap: cooking options left at Unity's default (30), not the slower-to-simulate 16
                 var hm = FindOrThrow(module.Types, t => t.Name == "Heightmap", "Heightmap");
                 var hmAwake = FindOrThrow(hm.Methods, m => m.Name == "Awake", "Heightmap.Awake");
                 var hmInstrs = hmAwake.Body.Instructions;
                 bool fastCooking = hmInstrs.Any(i => i.OpCode == OpCodes.Callvirt && i.Operand?.ToString()?.Contains("set_cookingOptions") == true
-                                                  && i.Previous?.OpCode == OpCodes.Ldc_I4_S && (sbyte)i.Previous.Operand == 16);
-                AssertCheck(fastCooking, "P1 Heightmap Fast Cooking", "MeshCollider.cookingOptions = UseFastMidphase (no cleaning/welding)");
+                                                  && i.Previous?.OpCode == OpCodes.Ldc_I4_S && (sbyte)i.Previous.Operand == 30);
+                AssertCheck(fastCooking, "P0 Heightmap Cooking", "MeshCollider.cookingOptions = Unity default (keeps CookForFasterSimulation for runtime physics)");
 
                 // 6. Point light limits 4/10/16
                 var gsm = FindOrThrow(module.Types, t => t.Name == "GraphicsSettingsManager", "GraphicsSettingsManager");
