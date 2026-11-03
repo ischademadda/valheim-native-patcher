@@ -2419,7 +2419,8 @@ namespace ValheimPatcher
                 var co = FindOrThrow(zns.Methods, m => m.Name == "CreateObjects" && m.Parameters.Count == 2, "ZNetScene.CreateObjects(2)");
                 bool vanillaStreaming = !zns.Fields.Any(f => f.Name.StartsWith("s_nativeCreate"))
                     && cos.Body.Instructions.Any(i => i.OpCode == OpCodes.Call && i.Operand is MethodReference mr && mr.Name == "Max")
-                    && co.Body.Instructions[0].OpCode == OpCodes.Ldc_I4_S && (sbyte)co.Body.Instructions[0].Operand == 10;
+                    // first int constant, not Instructions[0]: the profiler prepends its own prologue
+                    && co.Body.Instructions.First(i => i.OpCode == OpCodes.Ldc_I4_S) is { } maxInst && (sbyte)maxInst.Operand == 10;
                 AssertCheck(vanillaStreaming, "P0 Vanilla Object Streaming", "ZNetScene creates Max(Count/100, 10) objects/frame like vanilla (no pop-in of nearby mobs/pickables)");
 
                 // 14. All subsystems verified
