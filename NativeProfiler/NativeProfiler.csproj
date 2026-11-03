@@ -1,13 +1,22 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
-  <!-- Loaded by the game's Mono runtime from the Managed folder, so it must stay netstandard2.0 with no Unity references. -->
+  <!-- Loaded by the game's Mono runtime from the Managed folder: netstandard2.1, like Unity 6's own modules.
+       Unity's CoreModule is referenced from the game install for PlayerLoop/ProfilerRecorder only (not copied). -->
   <PropertyGroup>
-    <TargetFramework>netstandard2.0</TargetFramework>
+    <TargetFramework>netstandard2.1</TargetFramework>
     <AssemblyName>NativePatchProfiler</AssemblyName>
     <RootNamespace>NativePatchProfiler</RootNamespace>
     <LangVersion>latest</LangVersion>
     <Nullable>disable</Nullable>
     <DebugType>none</DebugType>
+    <GameManaged>$(MSBuildThisFileDirectory)../valheim.app/Contents/Resources/Data/Managed</GameManaged>
   </PropertyGroup>
+
+  <ItemGroup>
+    <Reference Include="UnityEngine.CoreModule">
+      <HintPath>$(GameManaged)/UnityEngine.CoreModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
 
 </Project>

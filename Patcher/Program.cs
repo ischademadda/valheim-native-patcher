@@ -2102,16 +2102,18 @@ namespace ValheimPatcher
             }
             Console.WriteLine($"  + MonoUpdaters batches instrumented: {scopes} methods (per-category timings)");
 
-            // 3. Known heavy methods that run nested inside the messages above
-            var nested = new (string Type, string Method)[]
+            // 3. Known heavy methods: most run nested inside the messages above; Invoke/InvokeRepeating targets are top-level
+            var hotPaths = new (string Type, string Method, bool Nested)[]
             {
-                ("ZNetScene", "CreateDestroyObjects"), ("ZNetScene", "CreateObjects"), ("ZNetScene", "RemoveObjects"),
-                ("ZoneSystem", "CreateLocalZones"), ("ZoneSystem", "SpawnZone"),
-                ("Heightmap", "Regenerate"), ("Heightmap", "RebuildCollisionMesh"), ("Heightmap", "RebuildRenderMesh"),
-                ("Minimap", "Explore"), ("WearNTearUpdater", "UpdateWearNTear"),
-                ("ZNet", "Save"), ("ZNet", "SaveWorld"), ("Game", "SavePlayerProfile"), ("Game", "CollectResources"),
+                ("ZNetScene", "CreateDestroyObjects", true), ("ZNetScene", "CreateObjects", true), ("ZNetScene", "RemoveObjects", true),
+                ("ZoneSystem", "CreateLocalZones", true), ("ZoneSystem", "SpawnZone", true),
+                ("Heightmap", "Regenerate", true), ("Heightmap", "RebuildCollisionMesh", true), ("Heightmap", "RebuildRenderMesh", true),
+                ("Minimap", "Explore", true), ("WearNTearUpdater", "UpdateWearNTear", true),
+                ("ZNet", "Save", true), ("ZNet", "SaveWorld", true), ("Game", "SavePlayerProfile", true), ("Game", "CollectResources", true),
+                ("ReflectionUpdate", "UpdateReflection", true),
+                ("DepthCamera", "RenderDepth", false),
             };
-            foreach (var (typeName, methodName) in nested)
+            foreach (var (typeName, methodName, isNested) in hotPaths)
             {
                 var type = module.Types.FirstOrDefault(t => t.Name == typeName);
                 // Explore(int,int) is the per-pixel overload; only time the per-tick Explore(Vector3,float)
@@ -2122,9 +2124,9 @@ namespace ValheimPatcher
                     Console.WriteLine($"  ! {typeName}.{methodName} not found, skipped");
                     continue;
                 }
-                foreach (var m in targets) InstrumentById(m, $">{typeName}.{methodName}");
+                foreach (var m in targets) InstrumentById(m, $"{(isNested ? ">" : "")}{typeName}.{methodName}");
             }
-            Console.WriteLine($"  + Nested hot-path methods instrumented: {nested.Length} targets");
+            Console.WriteLine($"  + Hot-path methods instrumented: {hotPaths.Length} targets");
 
             // 4. Section names + frame marker at the start of Game.Update
             var gameType = FindOrThrow(module.Types, t => t.Name == "Game", "Game");
