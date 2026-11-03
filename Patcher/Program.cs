@@ -26,10 +26,11 @@ namespace ValheimPatcher
         public const string MarkerFieldNameV6 = "s_nativePatched_v6";
         public const string MarkerFieldNameV7 = "s_nativePatched_v7";
         public const string MarkerFieldNameV8 = "s_nativePatched_v8";
+        // v9.6: bulk minimap serialization on save, DepthCamera skips re-rendering an unchanged view.
         // v9.5: fully vanilla object streaming (throttling it made nearby mobs/pickables pop in late).
         // v9.3: vanilla terrain cooking options. v9.2: heightmap rebuild budget.
         // Bumping the marker makes "ensure" upgrade older v9 installs.
-        public const string MarkerFieldNameV9 = "s_nativePatched_v9_5";
+        public const string MarkerFieldNameV9 = "s_nativePatched_v9_6";
 
         /// <summary>Safe lookup with descriptive error on game version mismatch.</summary>
         static T FindOrThrow<T>(IEnumerable<T> source, Func<T, bool> predicate, string context)
@@ -235,7 +236,7 @@ namespace ValheimPatcher
 
             string verTag = targetVersion switch
             {
-                PatchVersion.V9 => "v9.5 (v7 + Vanilla-Correct Support, Fire & Object Streaming, Terrain Rebuild Budget - Recommended)",
+                PatchVersion.V9 => "v9.6 (v7 + Vanilla-Correct Support, Fire & Object Streaming, Terrain Rebuild Budget, Fast Autosave - Recommended)",
                 PatchVersion.V8 => "v8 (Zero-Stutter Anti-Pattern Elimination)",
                 PatchVersion.V7 => "v7 (Engine & Gameplay Fixes Edition)",
                 PatchVersion.V6 => "v6 (Robust Network & Gameplay Edition)",
@@ -363,7 +364,7 @@ namespace ValheimPatcher
             {
                 Console.ForegroundColor = ConsoleColor.Green;
                 if (marker.Name == MarkerFieldNameV9)
-                    Console.WriteLine($"Status: ALREADY PATCHED (marker: {marker.Name} [v9.5 - Vanilla-Correct Engine Fixes])");
+                    Console.WriteLine($"Status: ALREADY PATCHED (marker: {marker.Name} [v9.6 - Vanilla-Correct Engine Fixes])");
                 else if (marker.Name == MarkerFieldNameV8)
                     Console.WriteLine($"Status: ALREADY PATCHED (marker: {marker.Name} [v8 - Zero Stutter & Stability])");
                 else if (marker.Name == MarkerFieldNameV7)
@@ -572,6 +573,16 @@ namespace ValheimPatcher
             {
                 var getRealtimeDouble = module.ImportReference(FindOrThrow(timeType.Methods, m => m.Name == "get_realtimeSinceStartupAsDouble", "Time.get_realtimeSinceStartupAsDouble"));
                 ApplyHeightmapRegenBudget(heightmapType, getFrameCount, getRealtimeDouble, 0.004);
+
+                Console.WriteLine("\n[6b/18] Patching Minimap save (bulk explored-map serialization) & DepthCamera (skip unchanged re-render)...");
+                var minimapType = FindOrThrow(module.Types, t => t.Name == "Minimap", "Minimap");
+                var zpackageType = FindOrThrow(module.Types, t => t.Name == "ZPackage", "ZPackage");
+                ApplyMinimapBulkSave(minimapType, zpackageType, mscorlibAsm);
+
+                var depthCameraType = FindOrThrow(module.Types, t => t.Name == "DepthCamera", "DepthCamera");
+                var getTime = module.ImportReference(FindOrThrow(timeType.Methods, m => m.Name == "get_time", "Time.get_time"));
+                var vec3Equality = module.ImportReference(FindOrThrow(vec3Type.Methods, m => m.Name == "op_Equality", "Vector3.op_Equality"));
+                ApplyDepthCameraSkipUnchanged(depthCameraType, FindOrThrow(module.Types, t => t.Name == "ZNetScene", "ZNetScene"), getTime, vec3Equality, opImplicit, 5f);
             }
             if (targetVersion == PatchVersion.V8)
             {
@@ -941,6 +952,158 @@ namespace ValheimPatcher
             foreach (var b in block) il.InsertBefore(cont, b);
             clu.Body.OptimizeMacros();
             Console.WriteLine($"  + Heightmap.CustomLateUpdate: queued chunk rebuilds limited to {budgetSeconds * 1000:0} ms/frame (first always runs)");
+        }
+
+        /// <summary>
+        /// Minimap.GetMapData (every character autosave) writes the two 2048x2048 explored BitArrays one bool at a time:
+        /// ~8.4M BinaryWriter calls, 150-250 ms on the main thread. Writes the same bytes (0/1 per bit) in one call each.
+        /// </summary>
+        static void ApplyMinimapBulkSave(TypeDefinition minimapType, TypeDefinition zpackageType, AssemblyDefinition mscorlibAsm)
+        {
+            var module = minimapType.Module;
+            var getMapData = FindOrThrow(minimapType.Methods, m => m.Name == "GetMapData" && m.Parameters.Count == 0, "Minimap.GetMapData");
+            var fExplored = FindOrThrow(minimapType.Fields, f => f.Name == "m_explored", "Minimap.m_explored");
+            var fExploredOthers = FindOrThrow(minimapType.Fields, f => f.Name == "m_exploredOthers", "Minimap.m_exploredOthers");
+            var fPins = FindOrThrow(minimapType.Fields, f => f.Name == "m_pins", "Minimap.m_pins");
+            var fTextureSize = FindOrThrow(minimapType.Fields, f => f.Name == "m_textureSize", "Minimap.m_textureSize");
+            var fWriter = FindOrThrow(zpackageType.Fields, f => f.Name == "m_writer", "ZPackage.m_writer");
+
+            var bitArrayType = FindOrThrow(mscorlibAsm.MainModule.Types, t => t.FullName == "System.Collections.BitArray", "System.Collections.BitArray");
+            var bufferType = FindOrThrow(mscorlibAsm.MainModule.Types, t => t.FullName == "System.Buffer", "System.Buffer");
+            var writerType = FindOrThrow(mscorlibAsm.MainModule.Types, t => t.FullName == "System.IO.BinaryWriter", "System.IO.BinaryWriter");
+            var bitArrayRef = module.ImportReference(bitArrayType);
+            var getLength = module.ImportReference(FindOrThrow(bitArrayType.Methods, m => m.Name == "get_Length", "BitArray.get_Length"));
+            var copyTo = module.ImportReference(FindOrThrow(bitArrayType.Methods, m => m.Name == "CopyTo" && m.Parameters.Count == 2, "BitArray.CopyTo(Array,int)"));
+            var blockCopy = module.ImportReference(FindOrThrow(bufferType.Methods, m => m.Name == "BlockCopy" && m.Parameters.Count == 5, "Buffer.BlockCopy"));
+            var writeBytes = module.ImportReference(FindOrThrow(writerType.Methods, m => m.Name == "Write" && m.Parameters.Count == 1 &&
+                                                                 m.Parameters[0].ParameterType.FullName == "System.Byte[]", "BinaryWriter.Write(byte[])"));
+
+            // ZPackage.WriteBitsAsBytes(BitArray bits, int count): same output as count x Write(bits[i])
+            var writeBits = new MethodDefinition("WriteBitsAsBytes", MethodAttributes.Public | MethodAttributes.HideBySig, module.TypeSystem.Void);
+            writeBits.Parameters.Add(new ParameterDefinition("bits", ParameterAttributes.None, bitArrayRef));
+            writeBits.Parameters.Add(new ParameterDefinition("count", ParameterAttributes.None, module.TypeSystem.Int32));
+            var vBools = new VariableDefinition(new ArrayType(module.TypeSystem.Boolean));
+            var vBytes = new VariableDefinition(new ArrayType(module.TypeSystem.Byte));
+            writeBits.Body.Variables.Add(vBools);
+            writeBits.Body.Variables.Add(vBytes);
+            writeBits.Body.InitLocals = true;
+            var w = writeBits.Body.GetILProcessor();
+            // bool[] bools = new bool[bits.Length]; bits.CopyTo(bools, 0);
+            w.Emit(OpCodes.Ldarg_1); w.Emit(OpCodes.Callvirt, getLength); w.Emit(OpCodes.Newarr, module.TypeSystem.Boolean); w.Emit(OpCodes.Stloc, vBools);
+            w.Emit(OpCodes.Ldarg_1); w.Emit(OpCodes.Ldloc, vBools); w.Emit(OpCodes.Ldc_I4_0); w.Emit(OpCodes.Callvirt, copyTo);
+            // byte[] bytes = new byte[count]; Buffer.BlockCopy(bools, 0, bytes, 0, count);  (bool is one byte, 0 or 1)
+            w.Emit(OpCodes.Ldarg_2); w.Emit(OpCodes.Newarr, module.TypeSystem.Byte); w.Emit(OpCodes.Stloc, vBytes);
+            w.Emit(OpCodes.Ldloc, vBools); w.Emit(OpCodes.Ldc_I4_0); w.Emit(OpCodes.Ldloc, vBytes); w.Emit(OpCodes.Ldc_I4_0); w.Emit(OpCodes.Ldarg_2);
+            w.Emit(OpCodes.Call, blockCopy);
+            // m_writer.Write(bytes);  raw, no length prefix
+            w.Emit(OpCodes.Ldarg_0); w.Emit(OpCodes.Ldfld, fWriter); w.Emit(OpCodes.Ldloc, vBytes); w.Emit(OpCodes.Callvirt, writeBytes);
+            w.Emit(OpCodes.Ret);
+            zpackageType.Methods.Add(writeBits);
+
+            // Replace both per-bit loops in GetMapData: from after "pkg.Write(m_textureSize)" up to the pin count ("m_pins.Count(...)")
+            var body = getMapData.Body;
+            body.SimplifyMacros();
+            var instrs = body.Instructions;
+            int sizeIdx = -1, pinsIdx = -1;
+            for (int i = 1; i < instrs.Count - 1; i++)
+            {
+                if (sizeIdx < 0 && instrs[i].Operand is FieldReference fs && fs.Name == fTextureSize.Name &&
+                    instrs[i + 1].Operand is MethodReference wi && wi.Name == "Write" && wi.Parameters[0].ParameterType.MetadataType == MetadataType.Int32)
+                    sizeIdx = i + 1;
+                if (sizeIdx >= 0 && instrs[i].OpCode == OpCodes.Ldarg && instrs[i + 1].Operand is FieldReference fp && fp.Name == fPins.Name)
+                { pinsIdx = i; break; }
+            }
+            if (sizeIdx < 0 || pinsIdx < 0 || instrs[sizeIdx - 3].OpCode != OpCodes.Ldloc)
+                throw new InvalidOperationException("[PATCH ERROR] Minimap.GetMapData: unexpected IL (expected Write(m_textureSize) ... m_pins)");
+            var loops = instrs.Skip(sizeIdx + 1).Take(pinsIdx - sizeIdx - 1).ToList();
+            int boolWrites = loops.Count(i => i.Operand is MethodReference mr && mr.Name == "Write" && mr.Parameters[0].ParameterType.MetadataType == MetadataType.Boolean);
+            bool readsBoth = loops.Any(i => i.Operand is FieldReference f && f.Name == fExplored.Name) && loops.Any(i => i.Operand is FieldReference f && f.Name == fExploredOthers.Name);
+            if (boolWrites != 2 || !readsBoth || loops.Count > 40)
+                throw new InvalidOperationException($"[PATCH ERROR] Minimap.GetMapData: expected two per-bit write loops, found {boolWrites} Write(bool) in {loops.Count} instructions");
+            if (instrs.Any(i => i.Operand is Instruction t && loops.Contains(t) && !loops.Contains(i)) || body.ExceptionHandlers.Any(h => loops.Contains(h.TryStart) || loops.Contains(h.HandlerStart)))
+                throw new InvalidOperationException("[PATCH ERROR] Minimap.GetMapData: loop range is a branch target from outside");
+
+            var pkgVar = (VariableDefinition)instrs[sizeIdx - 3].Operand;
+            var il = body.GetILProcessor();
+            foreach (var x in loops) il.Remove(x);
+            var pinsStart = instrs[sizeIdx + 1];
+            foreach (var bits in new[] { fExplored, fExploredOthers })
+            {
+                // pkg.WriteBitsAsBytes(bits, m_explored.Length)  (vanilla bounds both loops by m_explored.Length)
+                il.InsertBefore(pinsStart, il.Create(OpCodes.Ldloc, pkgVar));
+                il.InsertBefore(pinsStart, il.Create(OpCodes.Ldarg_0));
+                il.InsertBefore(pinsStart, il.Create(OpCodes.Ldfld, bits));
+                il.InsertBefore(pinsStart, il.Create(OpCodes.Ldarg_0));
+                il.InsertBefore(pinsStart, il.Create(OpCodes.Ldfld, fExplored));
+                il.InsertBefore(pinsStart, il.Create(OpCodes.Callvirt, getLength));
+                il.InsertBefore(pinsStart, il.Create(OpCodes.Callvirt, writeBits));
+            }
+            body.OptimizeMacros();
+            Console.WriteLine("  + Minimap.GetMapData: explored maps serialized in bulk (identical bytes, no per-bit writer calls)");
+        }
+
+        /// <summary>
+        /// DepthCamera (rain/wetness "under a roof" mask) re-renders every piece and rock within 50 m from above once a second,
+        /// at maximum LOD. Skips the render when the view is identical to the last one: same rounded position and same number
+        /// of networked objects (any piece built/destroyed changes it). Re-renders at least every maxStaleSeconds regardless.
+        /// </summary>
+        static void ApplyDepthCameraSkipUnchanged(TypeDefinition depthCamType, TypeDefinition znetSceneType, MethodReference getTime,
+                                                  MethodReference vec3Equality, MethodReference opImplicit, float maxStaleSeconds)
+        {
+            var module = depthCamType.Module;
+            var render = FindOrThrow(depthCamType.Methods, m => m.Name == "RenderDepth", "DepthCamera.RenderDepth");
+            var getInstance = FindOrThrow(znetSceneType.Methods, m => m.Name == "get_instance", "ZNetScene.get_instance");
+            var nrOfInstances = FindOrThrow(znetSceneType.Methods, m => m.Name == "NrOfInstances" && m.Parameters.Count == 0, "ZNetScene.NrOfInstances");
+
+            var body = render.Body;
+            body.SimplifyMacros();
+            var instrs = body.Instructions;
+            // Expected: ...; ldarg.0; call Component::get_transform; ldloc pos; callvirt Transform::set_position; ... ; ret
+            int setIdx = -1;
+            for (int i = 3; i < instrs.Count; i++)
+                if (instrs[i].Operand is MethodReference sp && sp.Name == "set_position" && instrs[i - 1].OpCode == OpCodes.Ldloc &&
+                    instrs[i - 2].Operand is MethodReference gt && gt.Name == "get_transform" && instrs[i - 3].OpCode == OpCodes.Ldarg)
+                { setIdx = i; break; }
+            var ret = instrs[instrs.Count - 1];
+            if (setIdx < 0 || ret.OpCode != OpCodes.Ret || instrs.Count(i => i.Operand is MethodReference r && r.Name == "RenderWithShader") != 1)
+                throw new InvalidOperationException("[PATCH ERROR] DepthCamera.RenderDepth: unexpected IL (expected transform.position = pos before RenderWithShader)");
+            var posVar = (VariableDefinition)instrs[setIdx - 1].Operand;
+            var renderStart = instrs[setIdx - 3];
+
+            var fRendered = new FieldDefinition("m_nativeRendered", FieldAttributes.Private, module.TypeSystem.Boolean);
+            var fPos = new FieldDefinition("m_nativePos", FieldAttributes.Private, posVar.VariableType);
+            var fCount = new FieldDefinition("m_nativeCount", FieldAttributes.Private, module.TypeSystem.Int32);
+            var fTime = new FieldDefinition("m_nativeTime", FieldAttributes.Private, module.TypeSystem.Single);
+            foreach (var f in new[] { fRendered, fPos, fCount, fTime }) depthCamType.Fields.Add(f);
+            var vCount = new VariableDefinition(module.TypeSystem.Int32);
+            body.Variables.Add(vCount);
+
+            var il = body.GetILProcessor();
+            var store = il.Create(OpCodes.Ldarg_0);
+            var block = new[]
+            {
+                // No world loaded: always render (vanilla)
+                il.Create(OpCodes.Call, getInstance),
+                il.Create(OpCodes.Call, opImplicit),
+                il.Create(OpCodes.Brfalse, renderStart),
+                il.Create(OpCodes.Call, getInstance),
+                il.Create(OpCodes.Callvirt, nrOfInstances),
+                il.Create(OpCodes.Stloc, vCount),
+                // if (m_nativeRendered && count == m_nativeCount && pos == m_nativePos && Time.time - m_nativeTime < maxStale) return;
+                il.Create(OpCodes.Ldarg_0), il.Create(OpCodes.Ldfld, fRendered), il.Create(OpCodes.Brfalse, store),
+                il.Create(OpCodes.Ldloc, vCount), il.Create(OpCodes.Ldarg_0), il.Create(OpCodes.Ldfld, fCount), il.Create(OpCodes.Bne_Un, store),
+                il.Create(OpCodes.Ldloc, posVar), il.Create(OpCodes.Ldarg_0), il.Create(OpCodes.Ldfld, fPos), il.Create(OpCodes.Call, vec3Equality), il.Create(OpCodes.Brfalse, store),
+                il.Create(OpCodes.Call, getTime), il.Create(OpCodes.Ldarg_0), il.Create(OpCodes.Ldfld, fTime), il.Create(OpCodes.Sub),
+                il.Create(OpCodes.Ldc_R4, maxStaleSeconds), il.Create(OpCodes.Blt, ret),
+                // Remember what this render shows
+                store, il.Create(OpCodes.Ldc_I4_1), il.Create(OpCodes.Stfld, fRendered),
+                il.Create(OpCodes.Ldarg_0), il.Create(OpCodes.Ldloc, vCount), il.Create(OpCodes.Stfld, fCount),
+                il.Create(OpCodes.Ldarg_0), il.Create(OpCodes.Ldloc, posVar), il.Create(OpCodes.Stfld, fPos),
+                il.Create(OpCodes.Ldarg_0), il.Create(OpCodes.Call, getTime), il.Create(OpCodes.Stfld, fTime),
+            };
+            foreach (var b in block) il.InsertBefore(renderStart, b);
+            body.OptimizeMacros();
+            Console.WriteLine($"  + DepthCamera.RenderDepth: skips identical views (same position & object count), re-renders at least every {maxStaleSeconds:0}s");
         }
 
         static void ApplyMessageHudCanvasIsolation(TypeDefinition messageHudType, MethodReference getGameObject, MethodReference getCompCanvas, MethodReference addCompCanvas)
@@ -2319,7 +2482,7 @@ namespace ValheimPatcher
             Console.WriteLine($"Detected marker: {marker.Name} -> verifying against {verToVerify.ToString().ToLower()} ruleset...\n");
 
             int checksPassed = 0;
-            int totalChecks = verToVerify == PatchVersion.V9 ? 14 : verToVerify == PatchVersion.V8 ? 12 : (verToVerify == PatchVersion.V7 ? 10 : (verToVerify == PatchVersion.V6 ? 9 : 8));
+            int totalChecks = verToVerify == PatchVersion.V9 ? 16 : verToVerify == PatchVersion.V8 ? 12 : (verToVerify == PatchVersion.V7 ? 10 : (verToVerify == PatchVersion.V6 ? 9 : 8));
 
             void AssertCheck(bool condition, string name, string details)
             {
@@ -2425,7 +2588,22 @@ namespace ValheimPatcher
                     && co.Body.Instructions.First(i => i.OpCode == OpCodes.Ldc_I4_S) is { } maxInst && (sbyte)maxInst.Operand == 10;
                 AssertCheck(vanillaStreaming, "P0 Vanilla Object Streaming", "ZNetScene creates Max(Count/100, 10) objects/frame like vanilla (no pop-in of nearby mobs/pickables)");
 
-                // 14. All subsystems verified
+                // 14. Minimap explored maps serialized in bulk on save
+                var minimap = FindOrThrow(module.Types, t => t.Name == "Minimap", "Minimap");
+                var getMapData = FindOrThrow(minimap.Methods, m => m.Name == "GetMapData" && m.Parameters.Count == 0, "Minimap.GetMapData");
+                bool bulkSave = getMapData.Body.Instructions.Count(i => i.Operand is MethodReference mr && mr.Name == "WriteBitsAsBytes") == 2
+                             && !getMapData.Body.Instructions.Any(i => i.Operand is MethodReference mr && mr.Name == "get_Item");
+                AssertCheck(bulkSave, "P1 Minimap Bulk Save", "Explored maps written in one call each (autosave hitch without per-bit writes)");
+
+                // 15. DepthCamera skips identical re-renders
+                var depthCam = FindOrThrow(module.Types, t => t.Name == "DepthCamera", "DepthCamera");
+                var renderDepth = FindOrThrow(depthCam.Methods, m => m.Name == "RenderDepth", "DepthCamera.RenderDepth");
+                bool depthSkip = depthCam.Fields.Any(f => f.Name == "m_nativePos")
+                              && renderDepth.Body.Instructions.Any(i => i.Operand is MethodReference mr && mr.Name == "NrOfInstances")
+                              && renderDepth.Body.Instructions.Any(i => i.Operand is MethodReference mr && mr.Name == "RenderWithShader");
+                AssertCheck(depthSkip, "P1 DepthCamera Skip Unchanged", "Rain/wetness mask re-rendered only when position or objects change (at least every 5 s)");
+
+                // 16. All subsystems verified
                 AssertCheck(checksPassed == totalChecks - 1, "Overall Integrity", $"All {checksPassed}/{totalChecks - 1} subsystem audits passed successfully!");
             }
             else if (verToVerify == PatchVersion.V8)
