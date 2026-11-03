@@ -26,9 +26,10 @@ namespace ValheimPatcher
         public const string MarkerFieldNameV6 = "s_nativePatched_v6";
         public const string MarkerFieldNameV7 = "s_nativePatched_v7";
         public const string MarkerFieldNameV8 = "s_nativePatched_v8";
-        // v9.4: object creation time budget. v9.3: vanilla terrain cooking options.
-        // v9.2: heightmap rebuild budget + vanilla object streaming rate. Bumping the marker makes "ensure" upgrade older v9 installs.
-        public const string MarkerFieldNameV9 = "s_nativePatched_v9_4";
+        // v9.5: fully vanilla object streaming (throttling it made nearby mobs/pickables pop in late).
+        // v9.3: vanilla terrain cooking options. v9.2: heightmap rebuild budget.
+        // Bumping the marker makes "ensure" upgrade older v9 installs.
+        public const string MarkerFieldNameV9 = "s_nativePatched_v9_5";
 
         /// <summary>Safe lookup with descriptive error on game version mismatch.</summary>
         static T FindOrThrow<T>(IEnumerable<T> source, Func<T, bool> predicate, string context)
@@ -234,7 +235,7 @@ namespace ValheimPatcher
 
             string verTag = targetVersion switch
             {
-                PatchVersion.V9 => "v9.4 (v7 + Vanilla-Correct Support & Fire, Terrain & Object Streaming Budgets - Recommended)",
+                PatchVersion.V9 => "v9.5 (v7 + Vanilla-Correct Support, Fire & Object Streaming, Terrain Rebuild Budget - Recommended)",
                 PatchVersion.V8 => "v8 (Zero-Stutter Anti-Pattern Elimination)",
                 PatchVersion.V7 => "v7 (Engine & Gameplay Fixes Edition)",
                 PatchVersion.V6 => "v6 (Robust Network & Gameplay Edition)",
@@ -297,7 +298,7 @@ namespace ValheimPatcher
                 return 1;
             }
 
-            int spawnLimit = spawnLimitArg ?? (targetVersion == PatchVersion.V9 ? 10 : 25);
+            int spawnLimit = spawnLimitArg ?? 25;
 
             if (statusMode) { CheckStatus(dllPath, bakPath, managedDir); return 0; }
             if (restoreMode) return RestoreBackup(dllPath, bakPath);
@@ -362,7 +363,7 @@ namespace ValheimPatcher
             {
                 Console.ForegroundColor = ConsoleColor.Green;
                 if (marker.Name == MarkerFieldNameV9)
-                    Console.WriteLine($"Status: ALREADY PATCHED (marker: {marker.Name} [v9.4 - Vanilla-Correct Engine Fixes])");
+                    Console.WriteLine($"Status: ALREADY PATCHED (marker: {marker.Name} [v9.5 - Vanilla-Correct Engine Fixes])");
                 else if (marker.Name == MarkerFieldNameV8)
                     Console.WriteLine($"Status: ALREADY PATCHED (marker: {marker.Name} [v8 - Zero Stutter & Stability])");
                 else if (marker.Name == MarkerFieldNameV7)
@@ -512,13 +513,17 @@ namespace ValheimPatcher
             ApplyPhysicsCap(gameAwake, getFixedDeltaTime, setMaximumDeltaTime, setPixelLightCount, setSoftParticles, physicsSteps);
 
             // Patch 2: ZNetScene Spawn Limits
-            Console.WriteLine($"\n[3/15] Patching ZNetScene streaming limits (Max {spawnLimit} objects/frame)...");
             var znetType = FindOrThrow(module.Types, t => t.Name == "ZNetScene", "ZNetScene");
-            ApplyZNetScenePatches(znetType, mathfMinInt, spawnLimit);
             if (targetVersion == PatchVersion.V9)
             {
-                var getRealtimeDoubleZ = module.ImportReference(FindOrThrow(timeType.Methods, m => m.Name == "get_realtimeSinceStartupAsDouble", "Time.get_realtimeSinceStartupAsDouble"));
-                ApplyZNetSceneCreateBudget(znetType, getRealtimeDoubleZ, 0.004);
+                // Vanilla: 10/frame, scaled up to Count/100 in dense areas. Throttling it (fixed caps, time budget)
+                // left nearby mobs and pickables un-instantiated for seconds in bases and forests.
+                Console.WriteLine("\n[3/15] ZNetScene: preserved vanilla object streaming (10/frame, scales with nearby object count)");
+            }
+            else
+            {
+                Console.WriteLine($"\n[3/15] Patching ZNetScene streaming limits (Max {spawnLimit} objects/frame)...");
+                ApplyZNetScenePatches(znetType, mathfMinInt, spawnLimit);
             }
 
             // Patch 3: WearNTear Throttling & Support Caching
@@ -762,79 +767,6 @@ namespace ValheimPatcher
             il.InsertBefore(first, il.Create(OpCodes.Ldc_I4_0));
             il.InsertBefore(first, il.Create(OpCodes.Call, setSoftParticles));
             Console.WriteLine($"  + Injected physics cap + pixelLightCount=4 + softParticles=false into {awakeMethod.DeclaringType.Name}::{awakeMethod.Name}");
-        }
-
-        /// <summary>
-        /// The profiler showed ZNetScene.CreateObjects at up to ~65 ms: the per-frame limit counts objects, but one
-        /// prefab can cost several ms. Stop each creation loop once the frame's creation time exceeds the budget.
-        /// The check runs only after an object was created, so at least one object per frame is always created;
-        /// it is skipped on loading screens. CreateObject itself is untouched: returning null from it would make
-        /// the server destroy the ZDO as an invalid prefab.
-        /// </summary>
-        static void ApplyZNetSceneCreateBudget(TypeDefinition znetType, MethodReference getRealtimeDouble, double budgetSeconds)
-        {
-            var module = znetType.Module;
-            var fStart = new FieldDefinition("s_nativeCreateStart", FieldAttributes.Private | FieldAttributes.Static, module.TypeSystem.Double);
-            znetType.Fields.Add(fStart);
-            var inLoading = FindOrThrow(znetType.Methods, m => m.Name == "InLoadingScreen" && m.Parameters.Count == 0 && !m.IsStatic, "ZNetScene.InLoadingScreen");
-
-            // if (!InLoadingScreen() && now - s_nativeCreateStart > budget) <exceeded> else goto cont
-            Instruction[] OverBudget(ILProcessor il, Instruction cont, Instruction exceeded) => new[]
-            {
-                il.Create(OpCodes.Ldarg_0),
-                il.Create(OpCodes.Call, inLoading),
-                il.Create(OpCodes.Brtrue, cont),
-                il.Create(OpCodes.Call, getRealtimeDouble),
-                il.Create(OpCodes.Ldsfld, fStart),
-                il.Create(OpCodes.Sub),
-                il.Create(OpCodes.Ldc_R8, budgetSeconds),
-                il.Create(OpCodes.Ble_Un, cont),
-                exceeded,
-            };
-
-            // 1. CreateObjects: remember when this frame's creation started
-            var createObjects = FindOrThrow(znetType.Methods, m => m.Name == "CreateObjects" && m.Parameters.Count == 2, "ZNetScene.CreateObjects(2)");
-            {
-                var il = createObjects.Body.GetILProcessor();
-                var first = createObjects.Body.Instructions[0];
-                il.InsertBefore(first, il.Create(OpCodes.Call, getRealtimeDouble));
-                il.InsertBefore(first, il.Create(OpCodes.Stsfld, fStart));
-            }
-
-            // 2. Both loops end an iteration with: created++; if (created <cmp> limit) continue; break (leave).
-            //    Route "continue" through the budget check, which leaves the loop the same way break does.
-            void PatchLoop(string name, OpCode continueBranch, bool guardEntry)
-            {
-                var m = FindOrThrow(znetType.Methods, x => x.Name == name, "ZNetScene." + name);
-                m.Body.SimplifyMacros();
-                var instrs = m.Body.Instructions;
-                var il = m.Body.GetILProcessor();
-                int idx = -1;
-                for (int i = 2; i < instrs.Count - 1; i++)
-                    if (instrs[i].OpCode == continueBranch && instrs[i + 1].OpCode == OpCodes.Leave && instrs[i - 2].OpCode == OpCodes.Ldind_I4)
-                    { idx = i; break; }
-                if (idx < 0)
-                    throw new InvalidOperationException($"[PATCH ERROR] ZNetScene.{name}: unexpected IL (expected created++ / limit check / leave)");
-
-                var cont = (Instruction)instrs[idx].Operand;
-                var leave = instrs[idx + 1];
-                var check = OverBudget(il, cont, il.Create(OpCodes.Leave, (Instruction)leave.Operand));
-                instrs[idx].Operand = check[0];
-                var after = leave;
-                foreach (var c in check) { il.InsertAfter(after, c); after = c; }
-
-                if (guardEntry)
-                {
-                    // Don't start the distant pass at all once the near pass used up the budget
-                    var first = instrs[0];
-                    foreach (var c in OverBudget(il, first, il.Create(OpCodes.Ret))) il.InsertBefore(first, c);
-                }
-                m.Body.OptimizeMacros();
-            }
-
-            PatchLoop("CreateObjectsSorted", OpCodes.Blt, guardEntry: false);
-            PatchLoop("CreateDistantObjects", OpCodes.Ble, guardEntry: true);
-            Console.WriteLine($"  + ZNetScene object creation: stop after {budgetSeconds * 1000:0} ms/frame (first object always created, off on loading screens)");
         }
 
         static void ApplyZNetScenePatches(TypeDefinition znetType, MethodReference mathfMinInt, int spawnLimit)
@@ -2481,12 +2413,14 @@ namespace ValheimPatcher
                               && clu.Body.Instructions.Any(i => i.OpCode == OpCodes.Ldsfld && i.Operand?.ToString()?.Contains("s_nativeRegenStart") == true);
                 AssertCheck(hasBudget, "P1 Heightmap Rebuild Budget", "Queued terrain chunks rebuild within a 4 ms/frame budget (first one always runs)");
 
-                // 13. ZNetScene object creation budget in both creation loops
+                // 13. ZNetScene object streaming left vanilla (no caps, no time budget)
                 var zns = FindOrThrow(module.Types, t => t.Name == "ZNetScene", "ZNetScene");
-                bool Uses(string name, OpCode op) => FindOrThrow(zns.Methods, m => m.Name == name, "ZNetScene." + name).Body.Instructions
-                    .Any(i => i.OpCode == op && i.Operand?.ToString()?.Contains("s_nativeCreateStart") == true);
-                AssertCheck(Uses("CreateObjects", OpCodes.Stsfld) && Uses("CreateObjectsSorted", OpCodes.Ldsfld) && Uses("CreateDistantObjects", OpCodes.Ldsfld),
-                    "P1 Object Creation Budget", "Near/distant object creation stops after 4 ms/frame (first object always created, off during loading screens)");
+                var cos = FindOrThrow(zns.Methods, m => m.Name == "CreateObjectsSorted", "ZNetScene.CreateObjectsSorted");
+                var co = FindOrThrow(zns.Methods, m => m.Name == "CreateObjects" && m.Parameters.Count == 2, "ZNetScene.CreateObjects(2)");
+                bool vanillaStreaming = !zns.Fields.Any(f => f.Name.StartsWith("s_nativeCreate"))
+                    && cos.Body.Instructions.Any(i => i.OpCode == OpCodes.Call && i.Operand is MethodReference mr && mr.Name == "Max")
+                    && co.Body.Instructions[0].OpCode == OpCodes.Ldc_I4_S && (sbyte)co.Body.Instructions[0].Operand == 10;
+                AssertCheck(vanillaStreaming, "P0 Vanilla Object Streaming", "ZNetScene creates Max(Count/100, 10) objects/frame like vanilla (no pop-in of nearby mobs/pickables)");
 
                 // 14. All subsystems verified
                 AssertCheck(checksPassed == totalChecks - 1, "Overall Integrity", $"All {checksPassed}/{totalChecks - 1} subsystem audits passed successfully!");
