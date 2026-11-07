@@ -5,6 +5,7 @@ using System.IO;
 using System.Linq;
 using System.Text;
 using Unity.Profiling;
+using UnityEngine;
 using UnityEngine.LowLevel;
 
 namespace NativePatchProfiler
@@ -16,10 +17,13 @@ namespace NativePatchProfiler
     public static class Prof
     {
         const int Cap = 4096;
-        const double SlowFrameMs = 33.0;   // below 30 fps for a single frame = visible hitch
+        const double SlowFrameMs = 33.0;   // below 30 fps for a single frame (with vsync: one missed refresh)
+        const double HitchMs = 50.0;       // three or more refreshes: a real stall, always worth a line
         const double SpikeMs = 4.0;        // a single section eating 4 ms is worth counting
         const double WindowSeconds = 60.0;
-        const int MaxSlowLinesPerWindow = 40;
+        // Missed-refresh frames are frequent and alike, so they only get a sample; hitches get their own budget
+        const int MaxSlowLinesPerWindow = 10;
+        const int MaxHitchLinesPerWindow = 60;
 
         static readonly double s_tickToMs = 1000.0 / Stopwatch.Frequency;
 
@@ -41,7 +45,7 @@ namespace NativePatchProfiler
         static readonly int[] s_winCalls = new int[Cap];
         static readonly int[] s_winSpikes = new int[Cap];
         static long s_winFrames, s_winFrameTicks, s_winFrameMax, s_winStart;
-        static int s_winSlow, s_winGcs, s_winSlowLogged;
+        static int s_winSlow, s_winHitches, s_winGcs, s_winSlowLogged, s_winHitchLogged;
 
         static long s_lastFrame;
         static int s_lastGcCount;
@@ -109,6 +113,21 @@ namespace NativePatchProfiler
             catch (Exception ex)
             {
                 Write("profiler: PlayerLoop markers not installed: " + ex.Message);
+            }
+            Application.quitting += OnQuitting;
+        }
+
+        /// <summary>Writes the unfinished window and flushes, so the log does not end mid-line.</summary>
+        static void OnQuitting()
+        {
+            try
+            {
+                if (s_lastFrame != 0) WriteSummary(s_lastFrame, partial: true);
+                s_log?.Flush();
+            }
+            catch
+            {
+                // Never let the profiler break the game
             }
         }
 
@@ -252,13 +271,24 @@ namespace NativePatchProfiler
             if (gcThisFrame) s_winGcs++;
 
             double frameMs = frameTicks * s_tickToMs;
-            if (frameMs >= SlowFrameMs)
+            if (frameMs >= HitchMs)
+            {
+                s_winSlow++;
+                s_winHitches++;
+                if (s_winHitchLogged < MaxHitchLinesPerWindow)
+                {
+                    s_winHitchLogged++;
+                    LogSlowFrame("HITCH", frameMs, frameTicks, gcThisFrame);
+                    s_log?.Flush();
+                }
+            }
+            else if (frameMs >= SlowFrameMs)
             {
                 s_winSlow++;
                 if (s_winSlowLogged < MaxSlowLinesPerWindow)
                 {
                     s_winSlowLogged++;
-                    LogSlowFrame(frameMs, frameTicks, gcThisFrame);
+                    LogSlowFrame("SLOW ", frameMs, frameTicks, gcThisFrame);
                 }
             }
 
@@ -273,12 +303,14 @@ namespace NativePatchProfiler
 
             if ((now - s_winStart) * s_tickToMs >= WindowSeconds * 1000.0)
             {
-                WriteSummary(now);
+                WriteSummary(now, partial: false);
                 ResetWindow(now);
+                // The shadow census can take tens of ms: keep it out of the next frame's time
+                s_lastFrame = Stopwatch.GetTimestamp();
             }
         }
 
-        static void LogSlowFrame(double frameMs, long frameTicks, bool gc)
+        static void LogSlowFrame(string kind, double frameMs, long frameTicks, bool gc)
         {
             long topLevel = 0;
             for (int i = 0; i < s_touchedCount; i++)
@@ -288,7 +320,7 @@ namespace NativePatchProfiler
             }
             var ids = Enumerable.Range(0, s_touchedCount).Select(i => s_touchedList[i]).OrderByDescending(id => s_frameTicks[id]).ToList();
             var sb = new StringBuilder();
-            sb.Append($"{DateTime.Now:HH:mm:ss} SLOW {frameMs,6:0.0} ms{(gc ? " [GC]" : "")} | scripts {topLevel * s_tickToMs:0.0} | engine/render/wait {(frameTicks - topLevel) * s_tickToMs:0.0}");
+            sb.Append($"{DateTime.Now:HH:mm:ss} {kind} {frameMs,6:0.0} ms{(gc ? " [GC]" : "")}{CameraPos()} | scripts {topLevel * s_tickToMs:0.0} | engine/render/wait {(frameTicks - topLevel) * s_tickToMs:0.0}");
             foreach (int id in ids.Where(id => !s_loop[id]).Take(8))
             {
                 double ms = s_frameTicks[id] * s_tickToMs;
@@ -311,15 +343,18 @@ namespace NativePatchProfiler
             Write(sb.ToString());
         }
 
-        static void WriteSummary(long now)
+        static void WriteSummary(long now, bool partial)
         {
             if (s_winFrames == 0) return;
             double avgMs = s_winFrameTicks * s_tickToMs / s_winFrames;
             var sb = new StringBuilder();
-            sb.AppendLine($"--- {DateTime.Now:HH:mm:ss} summary: {s_winFrames} frames, avg {avgMs:0.0} ms ({1000.0 / avgMs:0} fps), worst {s_winFrameMax * s_tickToMs:0.0} ms, slow frames {s_winSlow}, gen0 GCs {s_winGcs}");
+            sb.AppendLine($"--- {DateTime.Now:HH:mm:ss} summary{(partial ? " (partial, quitting)" : "")}: {s_winFrames} frames, avg {avgMs:0.0} ms ({1000.0 / avgMs:0} fps), worst {s_winFrameMax * s_tickToMs:0.0} ms, " +
+                          $"slow frames {s_winSlow} (hitches >= {HitchMs:0} ms: {s_winHitches}), gen0 GCs {s_winGcs}{CameraPos()}");
             var valid = s_counters.Where(c => c.Valid).ToList();
             if (valid.Count > 0)
                 sb.AppendLine("    counters avg/max: " + string.Join(", ", valid.Select(c => $"{c.Label} {c.Format(c.WinSum / s_winFrames)}/{c.Format(c.WinMax)}")));
+            string mist = MistReport();
+            if (mist != null) sb.AppendLine("    " + mist);
             sb.AppendLine("    avg ms/frame |  worst ms | spikes | calls/frame | section");
             var active = Enumerable.Range(0, Cap).Where(id => s_winCalls[id] > 0).OrderByDescending(id => s_winTicks[id]).ToList();
             foreach (int id in active.Where(id => !s_loop[id]).Take(20))
@@ -330,8 +365,90 @@ namespace NativePatchProfiler
                 foreach (int id in active.Where(id => s_loop[id]).Take(15))
                     AppendRow(sb, id, "  ");
             }
+            if (!partial) AppendShadowCensus(sb);
             Write(sb.ToString().TrimEnd());
             s_log?.Flush();
+        }
+
+        static string CameraPos()
+        {
+            try
+            {
+                Camera cam = Camera.main;
+                if (cam == null) return "";
+                Vector3 p = cam.transform.position;
+                return $" @ {p.x:0},{p.z:0}";
+            }
+            catch
+            {
+                return "";
+            }
+        }
+
+        static readonly float[] s_censusBands = { 25f, 50f, 80f };
+
+        /// <summary>
+        /// Shadow-casting renderers that Unity drew last frame (camera or shadow map), by layer and camera distance.
+        /// Shows which layers fill the sun's shadow maps, to tune Light.layerShadowCullDistances.
+        /// </summary>
+        static void AppendShadowCensus(StringBuilder sb)
+        {
+            try
+            {
+                Camera cam = Camera.main;
+                if (cam == null) return;
+                long start = Stopwatch.GetTimestamp();
+                Vector3 camPos = cam.transform.position;
+                Renderer[] renderers = UnityEngine.Object.FindObjectsByType<Renderer>(FindObjectsSortMode.None);
+                int bands = s_censusBands.Length + 1;
+                var counts = new int[32 * bands];
+                int casters = 0;
+                foreach (Renderer r in renderers)
+                {
+                    if (!r.enabled || r.shadowCastingMode == UnityEngine.Rendering.ShadowCastingMode.Off || !r.isVisible) continue;
+                    float d = Vector3.Distance(camPos, r.bounds.center);
+                    int band = 0;
+                    while (band < s_censusBands.Length && d >= s_censusBands[band]) band++;
+                    counts[r.gameObject.layer * bands + band]++;
+                    casters++;
+                }
+                double ms = (Stopwatch.GetTimestamp() - start) * s_tickToMs;
+                string header = string.Join("/", new[] { "<" + s_censusBands[0] }.Concat(Enumerable.Range(1, s_censusBands.Length - 1).Select(i => $"{s_censusBands[i - 1]}-{s_censusBands[i]}")).Concat(new[] { s_censusBands[s_censusBands.Length - 1] + "+" }));
+                sb.AppendLine($"    -- shadow casters drawn, by layer ({header} m from camera; {casters} of {renderers.Length} renderers, shadowDistance {QualitySettings.shadowDistance:0} m, census {ms:0.0} ms) --");
+                var layers = Enumerable.Range(0, 32).Select(l => (Layer: l, Total: Enumerable.Range(0, bands).Sum(b => counts[l * bands + b])))
+                    .Where(x => x.Total > 0).OrderByDescending(x => x.Total).Take(10);
+                foreach (var (layer, total) in layers)
+                {
+                    string name = LayerMask.LayerToName(layer);
+                    string split = string.Join("/", Enumerable.Range(0, bands).Select(b => counts[layer * bands + b]));
+                    sb.AppendLine($"    {total,12} | {split,-21} | {layer,2} {(string.IsNullOrEmpty(name) ? "?" : name)}");
+                }
+            }
+            catch (Exception ex)
+            {
+                sb.AppendLine("    shadow census failed: " + ex.Message);
+            }
+        }
+
+        // NativePatchMist.dll (Mistlands fog rewrite) is a separate helper; looked up by name so the profiler works without it
+        static System.Reflection.MethodInfo s_mistReport;
+        static bool s_mistLooked;
+
+        static string MistReport()
+        {
+            try
+            {
+                if (!s_mistLooked)
+                {
+                    s_mistLooked = true;
+                    s_mistReport = Type.GetType("NativePatchMist.MistTick, NativePatchMist")?.GetMethod("TakeReport");
+                }
+                return (string)s_mistReport?.Invoke(null, null);
+            }
+            catch
+            {
+                return null;
+            }
         }
 
         static void AppendRow(StringBuilder sb, int id, string prefix)
@@ -359,7 +476,7 @@ namespace NativePatchProfiler
             Array.Clear(s_winCalls, 0, Cap);
             Array.Clear(s_winSpikes, 0, Cap);
             s_winFrames = s_winFrameTicks = s_winFrameMax = 0;
-            s_winSlow = s_winGcs = s_winSlowLogged = 0;
+            s_winSlow = s_winHitches = s_winGcs = s_winSlowLogged = s_winHitchLogged = 0;
             s_winStart = now;
             foreach (var c in s_counters) c.WinSum = c.WinMax = 0;
         }

@@ -1,0 +1,26 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- Mistlands fog logic, called from the patched ParticleMist.Update. Loaded by the game's Mono runtime from the Managed
+       folder: netstandard2.1 like the profiler helper. Compiled against the VANILLA assembly_valheim.dll.bak so the public
+       API it uses is the one the patcher starts from; Unity modules are referenced but not copied. -->
+  <PropertyGroup>
+    <TargetFramework>netstandard2.1</TargetFramework>
+    <AssemblyName>NativePatchMist</AssemblyName>
+    <RootNamespace>NativePatchMist</RootNamespace>
+    <LangVersion>latest</LangVersion>
+    <Nullable>disable</Nullable>
+    <DebugType>none</DebugType>
+    <NoWarn>$(NoWarn);MSB3277</NoWarn>
+    <GameManaged>$(MSBuildThisFileDirectory)../valheim.app/Contents/Resources/Data/Managed</GameManaged>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Reference Include="UnityEngine.CoreModule"><HintPath>$(GameManaged)/UnityEngine.CoreModule.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="UnityEngine.ParticleSystemModule"><HintPath>$(GameManaged)/UnityEngine.ParticleSystemModule.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="UnityEngine.PhysicsModule"><HintPath>$(GameManaged)/UnityEngine.PhysicsModule.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="UnityEngine.TerrainModule"><HintPath>$(GameManaged)/UnityEngine.TerrainModule.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="assembly_utils"><HintPath>$(GameManaged)/assembly_utils.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="assembly_valheim"><HintPath>$(GameManaged)/assembly_valheim.dll.bak</HintPath><Private>false</Private></Reference>
+  </ItemGroup>
+
+</Project>

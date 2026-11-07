@@ -9,3 +9,5 @@ autopatch.log
 autopatch.log.tmp
 NativeProfiler/bin/
 NativeProfiler/obj/
+NativeMist/bin/
+NativeMist/obj/

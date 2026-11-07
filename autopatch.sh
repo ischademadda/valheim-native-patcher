@@ -17,7 +17,8 @@ notify() {
 
 ensure_patch() {
     echo "=== $(date '+%Y-%m-%d %H:%M:%S') ensure $VERSION"
-    if [ ! -f "$PATCHER_DLL" ] || [ "$SCRIPT_DIR/Patcher/Program.cs" -nt "$PATCHER_DLL" ]; then
+    # Rebuild when any patcher or embedded helper (profiler, mist) source is newer than the build
+    if [ ! -f "$PATCHER_DLL" ] || [ -n "$(find "$SCRIPT_DIR/Patcher" "$SCRIPT_DIR/NativeProfiler" "$SCRIPT_DIR/NativeMist" \( -name '*.cs' -o -name '*.csproj' \) -not -path '*/obj/*' -not -path '*/bin/*' -newer "$PATCHER_DLL" | head -n 1)" ]; then
         "$DOTNET" build "$SCRIPT_DIR/Patcher" -c Release -v q --nologo || return 1
     fi
     "$DOTNET" "$PATCHER_DLL" ensure "$VERSION"

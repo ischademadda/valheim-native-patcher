@@ -26,11 +26,15 @@ namespace ValheimPatcher
         public const string MarkerFieldNameV6 = "s_nativePatched_v6";
         public const string MarkerFieldNameV7 = "s_nativePatched_v7";
         public const string MarkerFieldNameV8 = "s_nativePatched_v8";
+        // v9.11: sun shadows of small layers (items, effects, decorations, mobs) culled closer than the shadow distance.
+        // v9.10: navmesh link removal time-bounded (was up to 15 ms/frame in Mistlands).
+        // v9.9: navmesh tile rebuild interval x3 (Pathfinding), lower Mistlands particle caps (tunable via mist_cap file).
+        // v9.8: Mistlands fog rewritten (NativePatchMist.dll): cached mister geometry, emission spread over frames, no buried particles, particle cap.
         // v9.6: bulk minimap serialization on save, DepthCamera skips re-rendering an unchanged view.
         // v9.5: fully vanilla object streaming (throttling it made nearby mobs/pickables pop in late).
         // v9.3: vanilla terrain cooking options. v9.2: heightmap rebuild budget.
         // Bumping the marker makes "ensure" upgrade older v9 installs.
-        public const string MarkerFieldNameV9 = "s_nativePatched_v9_6";
+        public const string MarkerFieldNameV9 = "s_nativePatched_v9_11";
 
         /// <summary>Safe lookup with descriptive error on game version mismatch.</summary>
         static T FindOrThrow<T>(IEnumerable<T> source, Func<T, bool> predicate, string context)
@@ -236,7 +240,7 @@ namespace ValheimPatcher
 
             string verTag = targetVersion switch
             {
-                PatchVersion.V9 => "v9.6 (v7 + Vanilla-Correct Support, Fire & Object Streaming, Terrain Rebuild Budget, Fast Autosave - Recommended)",
+                PatchVersion.V9 => "v9.11 (v7 + Vanilla-Correct Support, Fire & Object Streaming, Terrain Rebuild Budget, Fast Autosave, Lean Mistlands Fog, Pathfinding Rebuild Throttle, Sun Shadow Layer Cull - Recommended)",
                 PatchVersion.V8 => "v8 (Zero-Stutter Anti-Pattern Elimination)",
                 PatchVersion.V7 => "v7 (Engine & Gameplay Fixes Edition)",
                 PatchVersion.V6 => "v6 (Robust Network & Gameplay Edition)",
@@ -364,7 +368,7 @@ namespace ValheimPatcher
             {
                 Console.ForegroundColor = ConsoleColor.Green;
                 if (marker.Name == MarkerFieldNameV9)
-                    Console.WriteLine($"Status: ALREADY PATCHED (marker: {marker.Name} [v9.6 - Vanilla-Correct Engine Fixes])");
+                    Console.WriteLine($"Status: ALREADY PATCHED (marker: {marker.Name} [v9.11 - Vanilla-Correct Engine Fixes])");
                 else if (marker.Name == MarkerFieldNameV8)
                     Console.WriteLine($"Status: ALREADY PATCHED (marker: {marker.Name} [v8 - Zero Stutter & Stability])");
                 else if (marker.Name == MarkerFieldNameV7)
@@ -398,6 +402,8 @@ namespace ValheimPatcher
             File.Copy(bakPath, dllPath, true);
             string profilerDll = Path.Combine(Path.GetDirectoryName(dllPath)!, ProfilerAssemblyFile);
             if (File.Exists(profilerDll)) File.Delete(profilerDll);
+            string mistDll = Path.Combine(Path.GetDirectoryName(dllPath)!, MistAssemblyFile);
+            if (File.Exists(mistDll)) File.Delete(mistDll);
             Console.ForegroundColor = ConsoleColor.Green;
             Console.WriteLine("[SUCCESS] Vanilla assembly successfully restored!");
             Console.ResetColor();
@@ -583,6 +589,13 @@ namespace ValheimPatcher
                 var getTime = module.ImportReference(FindOrThrow(timeType.Methods, m => m.Name == "get_time", "Time.get_time"));
                 var vec3Equality = module.ImportReference(FindOrThrow(vec3Type.Methods, m => m.Name == "op_Equality", "Vector3.op_Equality"));
                 ApplyDepthCameraSkipUnchanged(depthCameraType, FindOrThrow(module.Types, t => t.Name == "ZNetScene", "ZNetScene"), getTime, vec3Equality, opImplicit, 5f);
+
+                Console.WriteLine("\n[6c/18] Pathfinding navmesh rebuild interval (x3) & Mistlands fog...");
+                var pathfindingType = FindOrThrow(module.Types, t => t.Name == "Pathfinding", "Pathfinding");
+                ApplyPathfindingRebuildInterval(pathfindingType, 3f);
+                ApplyPathfindingLinkRemovalBudget(pathfindingType);
+                Console.WriteLine("  Replacing Mistlands fog emitter (ParticleMist.Update) with the lean NativePatchMist implementation...");
+                ApplyMistRewrite(module, managedDir);
             }
             if (targetVersion == PatchVersion.V8)
             {
@@ -613,6 +626,27 @@ namespace ValheimPatcher
                 ApplyForwardRenderingPatchesV6(gsmType, lightLodType, 4, 10, 16);
             else
                 ApplyForwardRenderingPatchesV6(gsmType, lightLodType, 4, 6, 8);
+
+            // Patch 8b: Sun shadow cull distances for small layers
+            if (targetVersion == PatchVersion.V9)
+            {
+                Console.WriteLine("\n[8b/18] Patching sun shadow cull distances for small-object layers...");
+                var lightType = FindOrThrow(coreModuleAsm.MainModule.Types, t => t.FullName == "UnityEngine.Light", "UnityEngine.Light");
+                var setLayerShadowCull = module.ImportReference(FindOrThrow(lightType.Methods, m => m.Name == "set_layerShadowCullDistances", "Light.set_layerShadowCullDistances"));
+                var envManType = FindOrThrow(module.Types, t => t.Name == "EnvMan", "EnvMan");
+                string? layerError = null;
+                string[]? layerNames = null;
+                try { layerNames = ReadLayerNames(Path.Combine(Path.GetDirectoryName(managedDir.TrimEnd(Path.DirectorySeparatorChar))!, "globalgamemanagers")); }
+                catch (Exception ex) { layerError = ex.Message; }
+                if (layerNames != null)
+                    ApplySunShadowLayerCull(envManType, setLayerShadowCull, opImplicit, layerNames);
+                else
+                {
+                    Console.ForegroundColor = ConsoleColor.Yellow;
+                    Console.WriteLine($"  ! Layer names unreadable ({layerError}), sun shadow cull skipped (vanilla shadows)");
+                    Console.ResetColor();
+                }
+            }
 
             // Patch 9: LightFlicker Transform Hierarchy
             Console.WriteLine("\n[9/18] Patching LightFlicker to eliminate transform hierarchy invalidation...");
@@ -728,6 +762,11 @@ namespace ValheimPatcher
             {
                 File.Delete(profilerDllPath);
                 Console.WriteLine($"Removed stale profiler helper: {profilerDllPath}");
+            }
+            if (targetVersion != PatchVersion.V9)
+            {
+                string staleMist = Path.Combine(managedDir, MistAssemblyFile);
+                if (File.Exists(staleMist)) File.Delete(staleMist);
             }
 
             // Add marker field
@@ -1104,6 +1143,174 @@ namespace ValheimPatcher
             foreach (var b in block) il.InsertBefore(renderStart, b);
             body.OptimizeMacros();
             Console.WriteLine($"  + DepthCamera.RenderDepth: skips identical views (same position & object count), re-renders at least every {maxStaleSeconds:0}s");
+        }
+
+        /// <summary>
+        /// Pathfinding.Buildtiles rebuilds every tile that creatures poked more than m_updateInterval (5 s, serialized in the prefab)
+        /// after its last build, so busy areas rebuild a tile on almost every 0.1 s tick; each finished build re-stitches the tile
+        /// edges and, when the stitch points moved, queues all old links for NavMesh.RemoveLink. The interval used by Buildtiles is
+        /// multiplied to cut that churn; a brand-new tile (never built) is still built immediately.
+        /// </summary>
+        static void ApplyPathfindingRebuildInterval(TypeDefinition pathfindingType, float factor)
+        {
+            var build = FindOrThrow(pathfindingType.Methods, m => m.Name == "Buildtiles", "Pathfinding.Buildtiles");
+            var body = build.Body;
+            var loads = body.Instructions.Where(i => i.OpCode == OpCodes.Ldfld && i.Operand is FieldReference fr && fr.Name == "m_updateInterval").ToList();
+            if (loads.Count != 1)
+                throw new InvalidOperationException($"[PATCH ERROR] Pathfinding.Buildtiles: expected one read of m_updateInterval, found {loads.Count}");
+            var il = body.GetILProcessor();
+            il.InsertAfter(loads[0], il.Create(OpCodes.Mul));
+            il.InsertAfter(loads[0], il.Create(OpCodes.Ldc_R4, factor));
+            body.MaxStackSize = Math.Max(body.MaxStackSize, 8);
+            Console.WriteLine($"  + Pathfinding.Buildtiles: tile rebuild interval x{factor:0.#} (5 s -> {5 * factor:0} s)");
+        }
+
+        /// <summary>
+        /// Pathfinding.DestroyQueuedNavmeshData runs every frame and removes the first Count/40 queued links with no time check
+        /// (only the removals beyond that are limited to 25 / 1 ms), so a long queue after link churn cost 4-15 ms per frame in
+        /// Mistlands. The forced share becomes 0: each frame removes links until 25 are gone or 1 ms has passed (always at least
+        /// one, so DestroyAllLinks still terminates). Stale links only linger a little longer before removal.
+        /// </summary>
+        static void ApplyPathfindingLinkRemovalBudget(TypeDefinition pathfindingType)
+        {
+            var destroy = FindOrThrow(pathfindingType.Methods, m => m.Name == "DestroyQueuedNavmeshData", "Pathfinding.DestroyQueuedNavmeshData");
+            var body = destroy.Body;
+            body.SimplifyMacros();
+            var instrs = body.Instructions;
+            int divIdx = -1;
+            for (int i = 2; i < instrs.Count - 1; i++)
+                if (instrs[i].OpCode == OpCodes.Div && instrs[i - 1].OpCode == OpCodes.Ldc_I4 && (int)instrs[i - 1].Operand == 40 &&
+                    instrs[i - 2].Operand is MethodReference mr && mr.Name == "get_Count" && instrs[i + 1].OpCode == OpCodes.Stloc)
+                { divIdx = i; break; }
+            if (divIdx < 0 || !instrs.Any(i => i.Operand is MethodReference r && r.Name == "RemoveLink"))
+                throw new InvalidOperationException("[PATCH ERROR] Pathfinding.DestroyQueuedNavmeshData: unexpected IL (expected forced = m_linkRemoveQueue.Count / 40)");
+            var il = body.GetILProcessor();
+            il.InsertAfter(instrs[divIdx], il.Create(OpCodes.Ldc_I4, 0));
+            il.InsertAfter(instrs[divIdx], il.Create(OpCodes.Pop));
+            body.OptimizeMacros();
+            Console.WriteLine("  + Pathfinding.DestroyQueuedNavmeshData: link removal bounded to 25 / 1 ms per frame (no unbounded Count/40 share)");
+        }
+
+        /// <summary>
+        /// Mistlands fog: ParticleMist.Update becomes "m_haveActiveMist = NativePatchMist.MistTick.Tick(this, m_haveActiveMist)".
+        /// The helper (embedded, dropped next to assembly_valheim.dll) keeps vanilla's emission rules but works on a per-tick
+        /// snapshot of mister/demister geometry, spreads emission over the following frames, skips particles buried in terrain
+        /// and caps distant mist below maxParticles. The private fields it replaces (accumulator, movement, last position) are
+        /// owned by the helper; m_haveActiveMist stays in the game because IsInMist / IsMistBlocked read it.
+        /// </summary>
+        static void ApplyMistRewrite(ModuleDefinition module, string managedDir)
+        {
+            string helperPath = Path.Combine(managedDir, MistAssemblyFile);
+            using var res = typeof(Program).Assembly.GetManifestResourceStream(MistAssemblyFile)
+                ?? throw new InvalidOperationException($"[PATCH ERROR] Embedded {MistAssemblyFile} missing from patcher build");
+            using var ms = new MemoryStream();
+            res.CopyTo(ms);
+            File.WriteAllBytes(helperPath, ms.ToArray());
+            ms.Position = 0;
+            using var helper = AssemblyDefinition.ReadAssembly(ms);
+            var tickType = FindOrThrow(helper.MainModule.Types, t => t.FullName == "NativePatchMist.MistTick", "NativePatchMist.MistTick");
+            var tick = module.ImportReference(FindOrThrow(tickType.Methods, m => m.Name == "Tick", "MistTick.Tick"));
+
+            var pm = FindOrThrow(module.Types, t => t.Name == "ParticleMist", "ParticleMist");
+            var update = FindOrThrow(pm.Methods, m => m.Name == "Update" && m.Parameters.Count == 0, "ParticleMist.Update");
+            var haveActive = FindOrThrow(pm.Fields, f => f.Name == "m_haveActiveMist", "ParticleMist.m_haveActiveMist");
+            foreach (var name in new[] { "m_localRange", "m_localEmission", "m_localEmissionPerUnit", "m_distantMaxRange", "m_distantThickness", "m_maxDistance", "m_emissionMax" })
+                FindOrThrow(pm.Fields, f => f.Name == name && f.IsPublic, "ParticleMist." + name);
+            var body = update.Body;
+            if (!body.Instructions.Any(i => i.Operand is FieldReference fr && fr.Name == "m_haveActiveMist") ||
+                !body.Instructions.Any(i => i.Operand is MethodReference mr && mr.Name == "Emit"))
+                throw new InvalidOperationException("[PATCH ERROR] ParticleMist.Update: unexpected IL (expected vanilla emitter)");
+
+            body.Instructions.Clear();
+            body.ExceptionHandlers.Clear();
+            body.Variables.Clear();
+            var il = body.GetILProcessor();
+            il.Emit(OpCodes.Ldarg_0);                 // target of the stfld
+            il.Emit(OpCodes.Ldarg_0);                 // MistTick.Tick(this, m_haveActiveMist)
+            il.Emit(OpCodes.Ldarg_0);
+            il.Emit(OpCodes.Ldfld, haveActive);
+            il.Emit(OpCodes.Call, tick);
+            il.Emit(OpCodes.Stfld, haveActive);
+            il.Emit(OpCodes.Ret);
+            Console.WriteLine($"  + ParticleMist.Update -> NativePatchMist.MistTick.Tick (helper written to {helperPath})");
+        }
+
+        /// <summary>Sun shadow cull distance (m) per layer; 0/unlisted = QualitySettings.shadowDistance (80/120/150 m).</summary>
+        static readonly (string Layer, float Meters)[] SunShadowLayerCull =
+        {
+            ("effect", 20f),          // particles' mesh parts, fire/smoke props
+            ("item", 25f),            // dropped items
+            ("Default_small", 30f),   // small rocks, bushes, pickables
+            ("piece_nonsolid", 35f),  // torches, banners, item stands, rugs
+            ("character", 60f),       // mobs (skinned meshes are the costliest casters)
+        };
+
+        /// <summary>
+        /// Reads the 32 layer names from TagManager in globalgamemanagers (serialized as a 32-entry string vector
+        /// starting with "Default", "TransparentFX"), so cull distances follow layer names, not hard-coded indices.
+        /// </summary>
+        static string[] ReadLayerNames(string globalGameManagersPath)
+        {
+            byte[] b = File.ReadAllBytes(globalGameManagersPath);
+            byte[] probe = { 0x07, 0, 0, 0, (byte)'D', (byte)'e', (byte)'f', (byte)'a', (byte)'u', (byte)'l', (byte)'t', 0,
+                             0x0d, 0, 0, 0, (byte)'T', (byte)'r', (byte)'a', (byte)'n', (byte)'s', (byte)'p', (byte)'a', (byte)'r', (byte)'e', (byte)'n', (byte)'t', (byte)'F', (byte)'X' };
+            int p = b.AsSpan().IndexOf(probe);
+            if (p < 4 || BitConverter.ToInt32(b, p - 4) != 32)
+                throw new InvalidOperationException("TagManager layer table not found");
+            var names = new string[32];
+            for (int i = 0; i < 32; i++)
+            {
+                int len = BitConverter.ToInt32(b, p);
+                if (len < 0 || len > 64 || p + 4 + len > b.Length) throw new InvalidOperationException($"bad layer name length at #{i}");
+                names[i] = System.Text.Encoding.UTF8.GetString(b, p + 4, len);
+                p = (p + 4 + len + 3) & ~3;
+            }
+            return names;
+        }
+
+        /// <summary>
+        /// The sun renders every shadow caster within the shadow distance into its cascades: in a base that is thousands
+        /// of small renderers (items, decorations, mobs) whose shadows are a few pixels at 30+ m. EnvMan.Awake now gives
+        /// the directional light per-layer cull distances; terrain, building pieces, trees and rocks keep full range.
+        /// </summary>
+        static void ApplySunShadowLayerCull(TypeDefinition envManType, MethodReference setLayerShadowCull, MethodReference opImplicit, string[] layerNames)
+        {
+            var module = envManType.Module;
+            var fDirLight = FindOrThrow(envManType.Fields, f => f.Name == "m_dirLight", "EnvMan.m_dirLight");
+            var awake = FindOrThrow(envManType.Methods, m => m.Name == "Awake", "EnvMan.Awake");
+            var body = awake.Body;
+            body.SimplifyMacros();
+            var first = body.Instructions[0];
+            if (body.Instructions.Any(i => i.Operand == first) || body.ExceptionHandlers.Any(h => h.TryStart == first || h.HandlerStart == first))
+                throw new InvalidOperationException("[PATCH ERROR] EnvMan.Awake: first instruction is a branch target, cannot prepend safely");
+
+            var il = body.GetILProcessor();
+            var block = new List<Instruction>
+            {
+                // if (m_dirLight) m_dirLight.layerShadowCullDistances = new float[32] { ... };
+                il.Create(OpCodes.Ldarg_0), il.Create(OpCodes.Ldfld, fDirLight), il.Create(OpCodes.Call, opImplicit), il.Create(OpCodes.Brfalse, first),
+                il.Create(OpCodes.Ldarg_0), il.Create(OpCodes.Ldfld, fDirLight),
+                il.Create(OpCodes.Ldc_I4, 32), il.Create(OpCodes.Newarr, module.TypeSystem.Single),
+            };
+            var applied = new List<string>();
+            foreach (var (layer, meters) in SunShadowLayerCull)
+            {
+                int idx = Array.IndexOf(layerNames, layer);
+                if (idx < 0)
+                {
+                    Console.WriteLine($"  ! Layer '{layer}' not found, left at the shadow distance");
+                    continue;
+                }
+                block.Add(il.Create(OpCodes.Dup));
+                block.Add(il.Create(OpCodes.Ldc_I4, idx));
+                block.Add(il.Create(OpCodes.Ldc_R4, meters));
+                block.Add(il.Create(OpCodes.Stelem_R4));
+                applied.Add($"{layer}(#{idx}) {meters:0}m");
+            }
+            block.Add(il.Create(OpCodes.Callvirt, setLayerShadowCull));
+            foreach (var ins in block) il.InsertBefore(first, ins);
+            body.OptimizeMacros();
+            Console.WriteLine($"  + EnvMan.Awake: sun layerShadowCullDistances = {string.Join(", ", applied)}; other layers keep the full shadow distance");
         }
 
         static void ApplyMessageHudCanvasIsolation(TypeDefinition messageHudType, MethodReference getGameObject, MethodReference getCompCanvas, MethodReference addCompCanvas)
@@ -2156,6 +2363,7 @@ namespace ValheimPatcher
         // ==================== PROFILER INJECTION ====================
 
         const string ProfilerAssemblyFile = "NativePatchProfiler.dll";
+        const string MistAssemblyFile = "NativePatchMist.dll";
         const string ProfilerMarkerField = "s_nativeProfiler";
 
         /// <summary>
@@ -2275,6 +2483,8 @@ namespace ValheimPatcher
                 ("ZNet", "Save", true), ("ZNet", "SaveWorld", true), ("Game", "SavePlayerProfile", true), ("Game", "CollectResources", true),
                 ("ReflectionUpdate", "UpdateReflection", true),
                 ("DepthCamera", "RenderDepth", false),
+                ("Pathfinding", "BuildTile", true), ("Pathfinding", "UpdateAsyncBuild", true),
+                ("Pathfinding", "DestroyQueuedNavmeshData", true), ("Pathfinding", "TimeoutTiles", true),
             };
             foreach (var (typeName, methodName, isNested) in hotPaths)
             {
@@ -2482,7 +2692,7 @@ namespace ValheimPatcher
             Console.WriteLine($"Detected marker: {marker.Name} -> verifying against {verToVerify.ToString().ToLower()} ruleset...\n");
 
             int checksPassed = 0;
-            int totalChecks = verToVerify == PatchVersion.V9 ? 16 : verToVerify == PatchVersion.V8 ? 12 : (verToVerify == PatchVersion.V7 ? 10 : (verToVerify == PatchVersion.V6 ? 9 : 8));
+            int totalChecks = verToVerify == PatchVersion.V9 ? 20 : verToVerify == PatchVersion.V8 ? 12 : (verToVerify == PatchVersion.V7 ? 10 : (verToVerify == PatchVersion.V6 ? 9 : 8));
 
             void AssertCheck(bool condition, string name, string details)
             {
@@ -2603,7 +2813,37 @@ namespace ValheimPatcher
                               && renderDepth.Body.Instructions.Any(i => i.Operand is MethodReference mr && mr.Name == "RenderWithShader");
                 AssertCheck(depthSkip, "P1 DepthCamera Skip Unchanged", "Rain/wetness mask re-rendered only when position or objects change (at least every 5 s)");
 
-                // 16. All subsystems verified
+                // 16. Mistlands fog emitter delegates to the helper, which must be present next to the assembly
+                var particleMist = FindOrThrow(module.Types, t => t.Name == "ParticleMist", "ParticleMist");
+                var mistUpdate = FindOrThrow(particleMist.Methods, m => m.Name == "Update" && m.Parameters.Count == 0, "ParticleMist.Update");
+                bool mistDelegated = mistUpdate.Body.Instructions.Count(i => i.Operand is MethodReference mr && mr.Name == "Tick" && mr.DeclaringType.Name == "MistTick") == 1
+                                  && !mistUpdate.Body.Instructions.Any(i => i.Operand is MethodReference mr && mr.Name == "Emit")
+                                  && File.Exists(Path.Combine(managedDir, MistAssemblyFile));
+                AssertCheck(mistDelegated, "P1 Mistlands Fog Rewrite", "ParticleMist.Update runs NativePatchMist.MistTick (cached geometry, spread emission, buried-particle skip, particle cap)");
+
+                // 17. Navmesh tile rebuild interval stretched
+                var pathfinding = FindOrThrow(module.Types, t => t.Name == "Pathfinding", "Pathfinding");
+                var buildtiles = FindOrThrow(pathfinding.Methods, m => m.Name == "Buildtiles", "Pathfinding.Buildtiles");
+                var bi = buildtiles.Body.Instructions;
+                int loadIdx = bi.ToList().FindIndex(i => i.OpCode == OpCodes.Ldfld && i.Operand is FieldReference fr && fr.Name == "m_updateInterval");
+                bool navScaled = loadIdx >= 0 && loadIdx + 2 < bi.Count && bi[loadIdx + 1].OpCode == OpCodes.Ldc_R4 && bi[loadIdx + 2].OpCode == OpCodes.Mul;
+                AssertCheck(navScaled, "P1 Pathfinding Rebuild Interval", "Navmesh tiles rebuilt at most every 15 s instead of 5 s (less link re-stitching churn)");
+
+                // 18. Navmesh link removal time-bounded
+                var destroyQueued = FindOrThrow(pathfinding.Methods, m => m.Name == "DestroyQueuedNavmeshData", "Pathfinding.DestroyQueuedNavmeshData");
+                var dq = destroyQueued.Body.Instructions.ToList();
+                int divAt = dq.FindIndex(i => i.OpCode == OpCodes.Div);
+                bool linkBudget = divAt >= 0 && divAt + 2 < dq.Count && dq[divAt + 1].OpCode == OpCodes.Pop && dq[divAt + 2].OpCode == OpCodes.Ldc_I4_0;
+                AssertCheck(linkBudget, "P1 Pathfinding Link Removal Budget", "Queued navmesh links removed at most 25 / 1 ms per frame (vanilla forced Count/40 with no time limit)");
+
+                // 19. Sun shadow cull distances for small layers
+                var envMan = FindOrThrow(module.Types, t => t.Name == "EnvMan", "EnvMan");
+                var envAwake = FindOrThrow(envMan.Methods, m => m.Name == "Awake", "EnvMan.Awake");
+                bool sunCull = envAwake.Body.Instructions.Any(i => i.Operand is MethodReference mr && mr.Name == "set_layerShadowCullDistances")
+                            && envAwake.Body.Instructions.Count(i => i.OpCode == OpCodes.Stelem_R4) == SunShadowLayerCull.Length;
+                AssertCheck(sunCull, "P1 Sun Shadow Layer Cull", $"Sun shadows of {string.Join("/", SunShadowLayerCull.Select(c => $"{c.Layer} {c.Meters:0}m"))}; terrain, pieces, trees keep full range");
+
+                // 20. All subsystems verified
                 AssertCheck(checksPassed == totalChecks - 1, "Overall Integrity", $"All {checksPassed}/{totalChecks - 1} subsystem audits passed successfully!");
             }
             else if (verToVerify == PatchVersion.V8)

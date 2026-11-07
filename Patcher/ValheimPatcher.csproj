@@ -17,4 +17,10 @@
     <EmbeddedResource Include="../NativeProfiler/bin/$(Configuration)/netstandard2.1/NativePatchProfiler.dll" LogicalName="NativePatchProfiler.dll" />
   </ItemGroup>
 
+  <!-- Mistlands fog logic (v9.8): same embedding scheme, always shipped with the v9 patch -->
+  <ItemGroup>
+    <ProjectReference Include="../NativeMist/NativeMist.csproj" ReferenceOutputAssembly="false" GlobalPropertiesToRemove="RuntimeIdentifier;SelfContained;PublishSingleFile;EnableCompressionInSingleFile" />
+    <EmbeddedResource Include="../NativeMist/bin/$(Configuration)/netstandard2.1/NativePatchMist.dll" LogicalName="NativePatchMist.dll" />
+  </ItemGroup>
+
 </Project>
