@@ -26,6 +26,11 @@ namespace ValheimPatcher
         public const string MarkerFieldNameV6 = "s_nativePatched_v6";
         public const string MarkerFieldNameV7 = "s_nativePatched_v7";
         public const string MarkerFieldNameV8 = "s_nativePatched_v8";
+        // v9.16: vanilla light limits and LightLod ranges again (lights reach as far as in the unpatched game).
+        // v9.15: ZNetScene survives instances destroyed by other code (vanilla RemoveObjects then threw forever: nothing unloaded).
+        // v9.14: expired-zone unloading check no longer rescans every scene object per zone (grew to 50 ms ticks over a session).
+        // v9.13: reflection probes without sun shadows, re-rendered every 12 s while the player stands still.
+        // v9.12: SunShafts skipped while the sun is off screen; reflection probes rendered one face per frame.
         // v9.11: sun shadows of small layers (items, effects, decorations, mobs) culled closer than the shadow distance.
         // v9.10: navmesh link removal time-bounded (was up to 15 ms/frame in Mistlands).
         // v9.9: navmesh tile rebuild interval x3 (Pathfinding), lower Mistlands particle caps (tunable via mist_cap file).
@@ -34,7 +39,7 @@ namespace ValheimPatcher
         // v9.5: fully vanilla object streaming (throttling it made nearby mobs/pickables pop in late).
         // v9.3: vanilla terrain cooking options. v9.2: heightmap rebuild budget.
         // Bumping the marker makes "ensure" upgrade older v9 installs.
-        public const string MarkerFieldNameV9 = "s_nativePatched_v9_11";
+        public const string MarkerFieldNameV9 = "s_nativePatched_v9_16";
 
         /// <summary>Safe lookup with descriptive error on game version mismatch.</summary>
         static T FindOrThrow<T>(IEnumerable<T> source, Func<T, bool> predicate, string context)
@@ -240,7 +245,7 @@ namespace ValheimPatcher
 
             string verTag = targetVersion switch
             {
-                PatchVersion.V9 => "v9.11 (v7 + Vanilla-Correct Support, Fire & Object Streaming, Terrain Rebuild Budget, Fast Autosave, Lean Mistlands Fog, Pathfinding Rebuild Throttle, Sun Shadow Layer Cull - Recommended)",
+                PatchVersion.V9 => "v9.16 (v7 + Vanilla-Correct Support, Fire & Object Streaming, Terrain Rebuild Budget, Fast Autosave, Lean Mistlands Fog, Pathfinding Rebuild Throttle, Sun Shadow Layer Cull, Idle Sun Shafts Skip, Lean Reflection Probe, Zone Unload Check, Scene Unload Fix - Recommended)",
                 PatchVersion.V8 => "v8 (Zero-Stutter Anti-Pattern Elimination)",
                 PatchVersion.V7 => "v7 (Engine & Gameplay Fixes Edition)",
                 PatchVersion.V6 => "v6 (Robust Network & Gameplay Edition)",
@@ -368,7 +373,7 @@ namespace ValheimPatcher
             {
                 Console.ForegroundColor = ConsoleColor.Green;
                 if (marker.Name == MarkerFieldNameV9)
-                    Console.WriteLine($"Status: ALREADY PATCHED (marker: {marker.Name} [v9.11 - Vanilla-Correct Engine Fixes])");
+                    Console.WriteLine($"Status: ALREADY PATCHED (marker: {marker.Name} [v9.16 - Vanilla-Correct Engine Fixes])");
                 else if (marker.Name == MarkerFieldNameV8)
                     Console.WriteLine($"Status: ALREADY PATCHED (marker: {marker.Name} [v8 - Zero Stutter & Stability])");
                 else if (marker.Name == MarkerFieldNameV7)
@@ -596,6 +601,9 @@ namespace ValheimPatcher
                 ApplyPathfindingLinkRemovalBudget(pathfindingType);
                 Console.WriteLine("  Replacing Mistlands fog emitter (ParticleMist.Update) with the lean NativePatchMist implementation...");
                 ApplyMistRewrite(module, managedDir);
+                ApplyRenderTweaks(module, managedDir);
+                ApplyZoneTtlCheck(module, managedDir);
+                ApplySceneObjectsFix(module, managedDir);
             }
             if (targetVersion == PatchVersion.V8)
             {
@@ -623,7 +631,11 @@ namespace ValheimPatcher
             if (targetVersion == PatchVersion.V5)
                 ApplyForwardRenderingPatchesV5(gsmType, lightLodType);
             else if (targetVersion == PatchVersion.V9)
-                ApplyForwardRenderingPatchesV6(gsmType, lightLodType, 4, 10, 16);
+            {
+                // v9.16: vanilla light counts and LightLod ranges (2/4/8 pixel, 4/15/40/unlimited point lights), soft particles still off
+                ApplySoftParticlesOff(gsmType);
+                Console.WriteLine("  + Lights: vanilla limits and LightLod distances, softParticles=false");
+            }
             else
                 ApplyForwardRenderingPatchesV6(gsmType, lightLodType, 4, 6, 8);
 
@@ -1313,6 +1325,115 @@ namespace ValheimPatcher
             Console.WriteLine($"  + EnvMan.Awake: sun layerShadowCullDistances = {string.Join(", ", applied)}; other layers keep the full shadow distance");
         }
 
+        /// <summary>
+        /// Image-identical render shortcuts in NativePatchMist.RenderTweaks (ApplyMistRewrite has already written the helper):
+        /// EnvMan.SetEnv hands the SunShafts effect and camera over right after setting its colour, and the helper disables
+        /// the effect in Camera.onPreCull while no screen point is within its radius of the sun (vanilla then renders five
+        /// full passes that add zero). ReflectionUpdate.Start lets the helper switch both probes to one cube face per frame.
+        /// </summary>
+        static void ApplyRenderTweaks(ModuleDefinition module, string managedDir)
+        {
+            using var helper = AssemblyDefinition.ReadAssembly(Path.Combine(managedDir, MistAssemblyFile));
+            var tweaks = FindOrThrow(helper.MainModule.Types, t => t.FullName == "NativePatchMist.RenderTweaks", "NativePatchMist.RenderTweaks");
+            var track = module.ImportReference(FindOrThrow(tweaks.Methods, m => m.Name == "TrackSunShafts", "RenderTweaks.TrackSunShafts"));
+            var slice = module.ImportReference(FindOrThrow(tweaks.Methods, m => m.Name == "SliceReflectionProbes", "RenderTweaks.SliceReflectionProbes"));
+
+            var envMan = FindOrThrow(module.Types, t => t.Name == "EnvMan", "EnvMan");
+            var setEnv = FindOrThrow(envMan.Methods, m => m.Name == "SetEnv", "EnvMan.SetEnv");
+            var body = setEnv.Body;
+            body.SimplifyMacros();
+            var instrs = body.Instructions;
+            int st = -1;
+            for (int i = 4; i < instrs.Count; i++)
+                if (instrs[i].OpCode == OpCodes.Stfld && instrs[i].Operand is FieldReference fr && fr.Name == "sunColor" && fr.DeclaringType.Name == "SunShafts" &&
+                    instrs[i - 4].OpCode == OpCodes.Ldloc)
+                { st = i; break; }
+            int camStore = instrs.ToList().FindIndex(i => i.Operand is MethodReference mr && mr.Name == "GetMainCamera");
+            if (st < 0 || camStore < 0 || instrs[camStore + 1].OpCode != OpCodes.Stloc)
+                throw new InvalidOperationException("[PATCH ERROR] EnvMan.SetEnv: unexpected IL (expected cam = Utils.GetMainCamera(); ... shafts.sunColor = m_dirLight.color)");
+            var shaftsVar = (VariableDefinition)instrs[st - 4].Operand;
+            var camVar = (VariableDefinition)instrs[camStore + 1].Operand;
+            var il = body.GetILProcessor();
+            var after = instrs[st];
+            foreach (var ins in new[] { il.Create(OpCodes.Ldloc, shaftsVar), il.Create(OpCodes.Ldloc, camVar), il.Create(OpCodes.Call, track) }.Reverse())
+                il.InsertAfter(after, ins);
+            body.OptimizeMacros();
+            Console.WriteLine("  + EnvMan.SetEnv: SunShafts handed to RenderTweaks (skipped while the sun is off screen, image-identical)");
+
+            var reflection = FindOrThrow(module.Types, t => t.Name == "ReflectionUpdate", "ReflectionUpdate");
+            var start = FindOrThrow(reflection.Methods, m => m.Name == "Start", "ReflectionUpdate.Start");
+            var sb = start.Body;
+            var first = sb.Instructions[0];
+            if (sb.Instructions.Any(i => i.Operand == first))
+                throw new InvalidOperationException("[PATCH ERROR] ReflectionUpdate.Start: first instruction is a branch target, cannot prepend safely");
+            var sil = sb.GetILProcessor();
+            sil.InsertBefore(first, sil.Create(OpCodes.Ldarg_0));
+            sil.InsertBefore(first, sil.Create(OpCodes.Call, slice));
+            Console.WriteLine("  + ReflectionUpdate.Start: reflection probes one face per frame, no sun shadows, 12 s interval while idle (settings logged to Player.log)");
+        }
+
+        static void ApplyZoneTtlCheck(ModuleDefinition module, string managedDir)
+        {
+            using var helper = AssemblyDefinition.ReadAssembly(Path.Combine(managedDir, MistAssemblyFile));
+            var ttl = FindOrThrow(helper.MainModule.Types, t => t.FullName == "NativePatchMist.ZoneTtl", "NativePatchMist.ZoneTtl");
+            var check = module.ImportReference(FindOrThrow(ttl.Methods, m => m.Name == "HaveInstanceInSector", "ZoneTtl.HaveInstanceInSector"));
+
+            var scene = FindOrThrow(module.Types, t => t.Name == "ZNetScene", "ZNetScene");
+            var instances = FindOrThrow(scene.Fields, f => f.Name == "m_instances", "ZNetScene.m_instances");
+            var have = FindOrThrow(scene.Methods, m => m.Name == "HaveInstanceInSector" && m.Parameters.Count == 1, "ZNetScene.HaveInstanceInSector");
+            var body = have.Body;
+            if (!body.Instructions.Any(i => i.Operand is FieldReference fr && fr.Name == "m_instances") ||
+                !body.Instructions.Any(i => i.Operand is MethodReference mr && mr.Name == "GetZone") ||
+                !body.Instructions.Any(i => i.Operand is FieldReference fd && fd.Name == "m_distant"))
+                throw new InvalidOperationException("[PATCH ERROR] ZNetScene.HaveInstanceInSector: unexpected IL (expected vanilla instance scan)");
+            int callers = module.Types.SelectMany(AllTypes).SelectMany(t => t.Methods).Where(m => m.HasBody)
+                .Count(m => m.Body.Instructions.Any(i => i.Operand is MethodReference mr && mr.Name == "HaveInstanceInSector" && mr.DeclaringType.Name == "ZNetScene"));
+            if (callers != 1)
+                throw new InvalidOperationException($"[PATCH ERROR] ZNetScene.HaveInstanceInSector: expected 1 caller (ZoneSystem.UpdateTTL), found {callers}");
+
+            body.Instructions.Clear();
+            body.ExceptionHandlers.Clear();
+            body.Variables.Clear();
+            var il = body.GetILProcessor();
+            il.Emit(OpCodes.Ldarg_0);
+            il.Emit(OpCodes.Ldfld, instances);
+            il.Emit(OpCodes.Ldarg_1);
+            il.Emit(OpCodes.Call, check);
+            il.Emit(OpCodes.Ret);
+            Console.WriteLine("  + ZNetScene.HaveInstanceInSector -> NativePatchMist.ZoneTtl (expired-zone check without rescanning all objects)");
+        }
+
+        static void ApplySceneObjectsFix(ModuleDefinition module, string managedDir)
+        {
+            using var helper = AssemblyDefinition.ReadAssembly(Path.Combine(managedDir, MistAssemblyFile));
+            var fix = FindOrThrow(helper.MainModule.Types, t => t.FullName == "NativePatchMist.SceneObjects", "NativePatchMist.SceneObjects");
+            var scene = FindOrThrow(module.Types, t => t.Name == "ZNetScene", "ZNetScene");
+            var instances = FindOrThrow(scene.Fields, f => f.Name == "m_instances", "ZNetScene.m_instances");
+
+            foreach (var (name, args, marker) in new[] { ("RemoveObjects", 2, "TempRemoveEarmark"), ("OnZDODestroyed", 1, "ResetZDO") })
+            {
+                var target = FindOrThrow(fix.Methods, m => m.Name == name, "SceneObjects." + name);
+                var method = FindOrThrow(scene.Methods, m => m.Name == name && m.Parameters.Count == args, "ZNetScene." + name);
+                var body = method.Body;
+                if (!body.Instructions.Any(i => i.Operand is FieldReference fr && fr.Name == "m_instances") ||
+                    !body.Instructions.Any(i => i.Operand is MemberReference mr && mr.Name.Contains(marker)) ||
+                    !body.Instructions.Any(i => i.Operand is MethodReference mr && mr.Name == "get_gameObject"))
+                    throw new InvalidOperationException($"[PATCH ERROR] ZNetScene.{name}: unexpected IL (expected vanilla instance removal)");
+                body.Instructions.Clear();
+                body.ExceptionHandlers.Clear();
+                body.Variables.Clear();
+                var il = body.GetILProcessor();
+                il.Emit(OpCodes.Ldarg_0);
+                il.Emit(OpCodes.Ldfld, instances);
+                for (int a = 1; a <= args; a++) il.Emit(OpCodes.Ldarg, method.Parameters[a - 1]);
+                il.Emit(OpCodes.Call, module.ImportReference(target));
+                il.Emit(OpCodes.Ret);
+                Console.WriteLine($"  + ZNetScene.{name} -> NativePatchMist.SceneObjects (survives views destroyed outside ZNetScene)");
+            }
+        }
+
+        static IEnumerable<TypeDefinition> AllTypes(TypeDefinition t) => new[] { t }.Concat(t.NestedTypes.SelectMany(AllTypes));
+
         static void ApplyMessageHudCanvasIsolation(TypeDefinition messageHudType, MethodReference getGameObject, MethodReference getCompCanvas, MethodReference addCompCanvas)
         {
             var awake = FindOrThrow(messageHudType.Methods, m => m.Name == "Awake", "MessageHud.Awake");
@@ -1736,17 +1857,7 @@ namespace ValheimPatcher
             il.Append(LdcI4(pointMed)); il.Emit(OpCodes.Ret); il.Append(n1);
             il.Append(LdcI4(pointHigh)); il.Emit(OpCodes.Ret);
 
-            var applyQuality = FindOrThrow(gsmType.Methods, m => m.Name == "ApplyQualitySettings", "ApplyQualitySettings");
-            for (int i = 0; i < applyQuality.Body.Instructions.Count; i++)
-            {
-                var inst = applyQuality.Body.Instructions[i];
-                if (inst.Operand is MethodReference mr && mr.Name == "set_softParticles")
-                {
-                    if (applyQuality.Body.Instructions[i - 2].OpCode != OpCodes.Ldarg_0 || applyQuality.Body.Instructions[i - 1].OpCode != OpCodes.Ldfld)
-                        throw new InvalidOperationException("[PATCH ERROR] ApplyQualitySettings: unexpected IL before set_softParticles (expected ldarg.0; ldfld)");
-                    applyQuality.Body.Instructions[i - 2].OpCode = OpCodes.Nop; applyQuality.Body.Instructions[i - 1].OpCode = OpCodes.Ldc_I4_0; applyQuality.Body.Instructions[i - 1].Operand = null; break;
-                }
-            }
+            ApplySoftParticlesOff(gsmType);
 
             var llCtor = FindOrThrow(lightLodType.Methods, m => m.IsConstructor && !m.IsStatic, "LightLod..ctor");
             for (int i = 0; i < llCtor.Body.Instructions.Count; i++)
@@ -1760,6 +1871,21 @@ namespace ValheimPatcher
                 }
             }
             Console.WriteLine($"  + Forward lights: 2/3/4, point: {pointLow}/{pointMed}/{pointHigh}, softParticles=false, LightLod 28m/14m (v6 adaptive)");
+        }
+
+        static void ApplySoftParticlesOff(TypeDefinition gsmType)
+        {
+            var applyQuality = FindOrThrow(gsmType.Methods, m => m.Name == "ApplyQualitySettings", "ApplyQualitySettings");
+            for (int i = 0; i < applyQuality.Body.Instructions.Count; i++)
+            {
+                var inst = applyQuality.Body.Instructions[i];
+                if (inst.Operand is MethodReference mr && mr.Name == "set_softParticles")
+                {
+                    if (applyQuality.Body.Instructions[i - 2].OpCode != OpCodes.Ldarg_0 || applyQuality.Body.Instructions[i - 1].OpCode != OpCodes.Ldfld)
+                        throw new InvalidOperationException("[PATCH ERROR] ApplyQualitySettings: unexpected IL before set_softParticles (expected ldarg.0; ldfld)");
+                    applyQuality.Body.Instructions[i - 2].OpCode = OpCodes.Nop; applyQuality.Body.Instructions[i - 1].OpCode = OpCodes.Ldc_I4_0; applyQuality.Body.Instructions[i - 1].Operand = null; break;
+                }
+            }
         }
 
         static void ApplyWearNTearPatchesV6(TypeDefinition wntType, TypeDefinition updaterType, MethodReference getFrameCount, MethodReference isOwnerMethod, int maxUpdatesPerFrame)
@@ -2477,7 +2603,7 @@ namespace ValheimPatcher
             var hotPaths = new (string Type, string Method, bool Nested)[]
             {
                 ("ZNetScene", "CreateDestroyObjects", true), ("ZNetScene", "CreateObjects", true), ("ZNetScene", "RemoveObjects", true),
-                ("ZoneSystem", "CreateLocalZones", true), ("ZoneSystem", "SpawnZone", true),
+                ("ZoneSystem", "CreateLocalZones", true), ("ZoneSystem", "SpawnZone", true), ("ZoneSystem", "UpdateTTL", true),
                 ("Heightmap", "Regenerate", true), ("Heightmap", "RebuildCollisionMesh", true), ("Heightmap", "RebuildRenderMesh", true),
                 ("Minimap", "Explore", true), ("WearNTearUpdater", "UpdateWearNTear", true),
                 ("ZNet", "Save", true), ("ZNet", "SaveWorld", true), ("Game", "SavePlayerProfile", true), ("Game", "CollectResources", true),
@@ -2692,7 +2818,7 @@ namespace ValheimPatcher
             Console.WriteLine($"Detected marker: {marker.Name} -> verifying against {verToVerify.ToString().ToLower()} ruleset...\n");
 
             int checksPassed = 0;
-            int totalChecks = verToVerify == PatchVersion.V9 ? 20 : verToVerify == PatchVersion.V8 ? 12 : (verToVerify == PatchVersion.V7 ? 10 : (verToVerify == PatchVersion.V6 ? 9 : 8));
+            int totalChecks = verToVerify == PatchVersion.V9 ? 24 : verToVerify == PatchVersion.V8 ? 12 : (verToVerify == PatchVersion.V7 ? 10 : (verToVerify == PatchVersion.V6 ? 9 : 8));
 
             void AssertCheck(bool condition, string name, string details)
             {
@@ -2743,12 +2869,15 @@ namespace ValheimPatcher
                                                   && i.Previous?.OpCode == OpCodes.Ldc_I4_S && (sbyte)i.Previous.Operand == 30);
                 AssertCheck(fastCooking, "P0 Heightmap Cooking", "MeshCollider.cookingOptions = Unity default (keeps CookForFasterSimulation for runtime physics)");
 
-                // 6. Point light limits 4/10/16
+                // 6. Vanilla light limits and LightLod distances
                 var gsm = FindOrThrow(module.Types, t => t.Name == "GraphicsSettingsManager", "GraphicsSettingsManager");
                 var getPointLightLimit = FindOrThrow(gsm.Methods, m => m.Name == "GetPointLightLimit", "GetPointLightLimit");
-                bool lightsRaised = getPointLightLimit.Body.Instructions.Any(i => i.OpCode == OpCodes.Ldc_I4_S && (sbyte)i.Operand == 10)
-                                 && getPointLightLimit.Body.Instructions.Any(i => i.OpCode == OpCodes.Ldc_I4_S && (sbyte)i.Operand == 16);
-                AssertCheck(lightsRaised, "P1 Point Light Limits", "Low/Med/High = 4/10/16");
+                var lightLodV = FindOrThrow(module.Types, t => t.Name == "LightLod", "LightLod");
+                var lightLodCtor = FindOrThrow(lightLodV.Methods, m => m.IsConstructor && !m.IsStatic, "LightLod..ctor");
+                bool vanillaLights = getPointLightLimit.Body.Instructions.Any(i => i.OpCode == OpCodes.Ldc_I4_S && (sbyte)i.Operand == 15)
+                                  && getPointLightLimit.Body.Instructions.Any(i => i.OpCode == OpCodes.Ldc_I4_S && (sbyte)i.Operand == 40)
+                                  && lightLodCtor.Body.Instructions.Any(i => i.OpCode == OpCodes.Ldc_R4 && (float)i.Operand == 40f);
+                AssertCheck(vanillaLights, "P1 Vanilla Lights", "Point lights Low/Med/High/Max = 4/15/40/unlimited, LightLod 40 m light / 20 m shadow (vanilla)");
 
                 // 7. ClutterSystem Off == 0.0m
                 var clutter = FindOrThrow(module.Types, t => t.Name == "ClutterSystem", "ClutterSystem");
@@ -2843,7 +2972,29 @@ namespace ValheimPatcher
                             && envAwake.Body.Instructions.Count(i => i.OpCode == OpCodes.Stelem_R4) == SunShadowLayerCull.Length;
                 AssertCheck(sunCull, "P1 Sun Shadow Layer Cull", $"Sun shadows of {string.Join("/", SunShadowLayerCull.Select(c => $"{c.Layer} {c.Meters:0}m"))}; terrain, pieces, trees keep full range");
 
-                // 20. All subsystems verified
+                // 20. SunShafts gate
+                var setEnvM = FindOrThrow(envMan.Methods, m => m.Name == "SetEnv", "EnvMan.SetEnv");
+                bool shaftsGate = setEnvM.Body.Instructions.Any(i => i.Operand is MethodReference mr && mr.Name == "TrackSunShafts" && mr.DeclaringType.Name == "RenderTweaks");
+                AssertCheck(shaftsGate, "P2 Idle Sun Shafts Skip", "SunShafts disabled per frame while no screen point is within its radius of the sun (adds zero in vanilla)");
+
+                // 21. Reflection probe time slicing
+                var reflUpd = FindOrThrow(module.Types, t => t.Name == "ReflectionUpdate", "ReflectionUpdate");
+                var reflStart = FindOrThrow(reflUpd.Methods, m => m.Name == "Start", "ReflectionUpdate.Start");
+                bool probeSlice = reflStart.Body.Instructions.Any(i => i.Operand is MethodReference mr && mr.Name == "SliceReflectionProbes");
+                AssertCheck(probeSlice, "P2 Reflection Probe Time Slicing", "Environment reflection: one cube face per frame, no sun shadows, 12 s interval while standing still");
+
+                // 22. Expired-zone check
+                var netScene = FindOrThrow(module.Types, t => t.Name == "ZNetScene", "ZNetScene");
+                var haveInSector = FindOrThrow(netScene.Methods, m => m.Name == "HaveInstanceInSector" && m.Parameters.Count == 1, "ZNetScene.HaveInstanceInSector");
+                bool zoneTtl = haveInSector.Body.Instructions.Any(i => i.Operand is MethodReference mr && mr.Name == "HaveInstanceInSector" && mr.DeclaringType.Name == "ZoneTtl");
+                AssertCheck(zoneTtl, "P1 Zone Unload Check", "ZoneSystem.UpdateTTL: occupied zones proven by a remembered object, at most one object scan per tick (vanilla: one per expired zone)");
+
+                // 23. Scene unload fix
+                bool sceneFix = new[] { "RemoveObjects", "OnZDODestroyed" }.All(n => netScene.Methods.Any(m => m.Name == n && m.HasBody &&
+                    m.Body.Instructions.Any(i => i.Operand is MethodReference mr && mr.Name == n && mr.DeclaringType.Name == "SceneObjects")));
+                AssertCheck(sceneFix, "P0 Scene Unload Fix", "ZNetScene.RemoveObjects/OnZDODestroyed skip views destroyed elsewhere (vanilla threw every 1/30 s and stopped unloading objects)");
+
+                // 24. All subsystems verified
                 AssertCheck(checksPassed == totalChecks - 1, "Overall Integrity", $"All {checksPassed}/{totalChecks - 1} subsystem audits passed successfully!");
             }
             else if (verToVerify == PatchVersion.V8)

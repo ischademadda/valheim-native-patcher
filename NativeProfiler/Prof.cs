@@ -353,8 +353,8 @@ namespace NativePatchProfiler
             var valid = s_counters.Where(c => c.Valid).ToList();
             if (valid.Count > 0)
                 sb.AppendLine("    counters avg/max: " + string.Join(", ", valid.Select(c => $"{c.Label} {c.Format(c.WinSum / s_winFrames)}/{c.Format(c.WinMax)}")));
-            string mist = MistReport();
-            if (mist != null) sb.AppendLine("    " + mist);
+            foreach (string report in HelperReports())
+                sb.AppendLine("    " + report);
             sb.AppendLine("    avg ms/frame |  worst ms | spikes | calls/frame | section");
             var active = Enumerable.Range(0, Cap).Where(id => s_winCalls[id] > 0).OrderByDescending(id => s_winTicks[id]).ToList();
             foreach (int id in active.Where(id => !s_loop[id]).Take(20))
@@ -365,7 +365,8 @@ namespace NativePatchProfiler
                 foreach (int id in active.Where(id => s_loop[id]).Take(15))
                     AppendRow(sb, id, "  ");
             }
-            if (!partial) AppendShadowCensus(sb);
+            // The census walks every renderer (5-50 ms): opt-in with an empty "census_on" file next to the log
+            if (!partial && File.Exists(Path.Combine(LogDirectory(), "census_on"))) AppendShadowCensus(sb);
             Write(sb.ToString().TrimEnd());
             s_log?.Flush();
         }
@@ -431,23 +432,20 @@ namespace NativePatchProfiler
         }
 
         // NativePatchMist.dll (Mistlands fog rewrite) is a separate helper; looked up by name so the profiler works without it
-        static System.Reflection.MethodInfo s_mistReport;
-        static bool s_mistLooked;
+        static System.Reflection.MethodInfo[] s_helperReports;
 
-        static string MistReport()
+        // Statistics lines of the patch helper (mist emitter, zone unloading), when it is installed
+        static IEnumerable<string> HelperReports()
         {
-            try
+            if (s_helperReports == null)
+                s_helperReports = new[] { "NativePatchMist.MistTick", "NativePatchMist.ZoneTtl", "NativePatchMist.SceneObjects" }
+                    .Select(t => Type.GetType(t + ", NativePatchMist")?.GetMethod("TakeReport")).Where(m => m != null).ToArray();
+            foreach (var m in s_helperReports)
             {
-                if (!s_mistLooked)
-                {
-                    s_mistLooked = true;
-                    s_mistReport = Type.GetType("NativePatchMist.MistTick, NativePatchMist")?.GetMethod("TakeReport");
-                }
-                return (string)s_mistReport?.Invoke(null, null);
-            }
-            catch
-            {
-                return null;
+                string line;
+                try { line = (string)m.Invoke(null, null); }
+                catch { line = null; }
+                if (line != null) yield return line;
             }
         }
 
