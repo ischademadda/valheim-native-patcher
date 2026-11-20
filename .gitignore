@@ -11,3 +11,6 @@ NativeProfiler/bin/
 NativeProfiler/obj/
 NativeMist/bin/
 NativeMist/obj/
+
+# local IL dumps of game types (Iron Gate code, never publish)
+Patcher/inspect_*.txt
